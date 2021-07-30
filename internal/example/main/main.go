@@ -16,17 +16,27 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"net/http"
 	"os"
-	"time"
+	"sync"
 
 	"github.com/envoyproxy/go-control-plane/internal/example"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/test/v3"
-	"k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+)
+
+const (
+	CM_NAME               = "apiproxy-envoy-config"
+	NAMESPACE             = "test-shard-seikun-kambashi-westusc2"
+	DEFAULT_CONFIGMAP_KEY = "no configmap key"
+	DEFAULT_CONFIGMAP     = "no configmap"
 )
 
 var (
@@ -51,8 +61,62 @@ func init() {
 	flag.StringVar(&nodeID, "nodeID", "test-id", "Node ID")
 }
 
+func watchForChanges(clientset *kubernetes.Clientset, configmapKey *string, configmap *string, mutex *sync.Mutex) {
+	for {
+		watcher, err := clientset.CoreV1().ConfigMaps(NAMESPACE).Watch(context.TODO(),
+			metav1.SingleObject(metav1.ObjectMeta{Name: CM_NAME, Namespace: NAMESPACE}))
+		if err != nil {
+			panic("Unable to create watcher")
+		}
+		updateCurrentConfigmap(watcher.ResultChan(), configmapKey, configmap, mutex)
+	}
+}
+
+func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *string, configmap *string, mutex *sync.Mutex) {
+	for {
+		event, open := <-eventChannel
+		if open {
+			switch event.Type {
+			case watch.Added:
+				fallthrough
+			case watch.Modified:
+				mutex.Lock()
+				l.Debugf("[databricks-envoy-cp] configmap modified")
+				// Update our configmap
+				if updatedMap, ok := event.Object.(*corev1.ConfigMap); ok {
+					for key, value := range updatedMap.Data {
+						l.Debugf("[databricks-envoy-cp] %s => %s", key, value)
+						*configmapKey = key
+						*configmap = value
+					}
+				}
+				mutex.Unlock()
+			case watch.Deleted:
+				mutex.Lock()
+				// Fall back to the default value
+				*configmapKey = DEFAULT_CONFIGMAP_KEY
+				*configmap = DEFAULT_CONFIGMAP
+				mutex.Unlock()
+			default:
+				// Do nothing
+			}
+		} else {
+			// If eventChannel is closed, it means the server has closed the connection
+			return
+		}
+	}
+}
+
 func testClient() {
-	l.Debugf("[databricks-envoy-cp] try listing pods")
+	var (
+		currentConfigmapKey string
+		currentConfigmap    string
+		mutex               *sync.Mutex
+	)
+	currentConfigmapKey = DEFAULT_CONFIGMAP_KEY
+	currentConfigmap = DEFAULT_CONFIGMAP
+
+	l.Debugf("[databricks-envoy-cp] init k8s client")
 	// creates the in-cluster config
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -63,31 +127,29 @@ func testClient() {
 	if err != nil {
 		panic(err.Error())
 	}
-	for {
-		// get pods in all the namespaces by omitting namespace
-		// Or specify namespace to get pods in particular namespace
-		pods, err := clientset.CoreV1().Pods("test-shard-seikun-kambashi-westusc2").List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			panic(err.Error())
-		}
-		l.Debugf("There are %d pods in the cluster\n", len(pods.Items))
 
-		// Examples for error handling:
-		// - Use helper functions e.g. errors.IsNotFound()
-		// - And/or cast to StatusError and use its properties like e.g. ErrStatus.Message
-		_, err = clientset.CoreV1().Pods("default").Get(context.TODO(), "example-xxxxx", metav1.GetOptions{})
-		if errors.IsNotFound(err) {
-			l.Debugf("Pod example-xxxxx not found in default namespace\n")
-		} else if statusError, isStatus := err.(*errors.StatusError); isStatus {
-			l.Debugf("Error getting pod %v\n", statusError.ErrStatus.Message)
-		} else if err != nil {
-			panic(err.Error())
-		} else {
-			l.Debugf("Found example-xxxxx pod in default namespace\n")
-		}
-
-		time.Sleep(10 * time.Second)
+	l.Debugf("[databricks-envoy-cp] k8s client try list pods")
+	// Sanity check we can list pods
+	pods, err := clientset.CoreV1().Pods(NAMESPACE).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		panic(err.Error())
 	}
+	l.Debugf("[databricks-envoy-cp] There are %d pods in the cluster\n", len(pods.Items))
+
+	l.Debugf("[databricks-envoy-cp] setup watcher")
+	mutex = &sync.Mutex{}
+	go watchForChanges(clientset, &currentConfigmapKey, &currentConfigmap, mutex)
+
+	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		mutex.Lock()
+		body := []byte(fmt.Sprintf(`{"current_configmap_key": "%s"}`, currentConfigmapKey))
+		mutex.Unlock()
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+	})
+
+	l.Debugf("Listening on port 8080\n")
+	http.ListenAndServe(":8080", nil)
 }
 
 func main() {
@@ -115,6 +177,7 @@ func main() {
 	l.Debugf("[databricks-envoy-cp] testing k8s client")
 	testClient()
 
+	l.Debugf("[databricks-envoy-cp] running server")
 	// Run the xDS server
 	ctx := context.Background()
 	cb := &test.Callbacks{Debug: l.Debug}
