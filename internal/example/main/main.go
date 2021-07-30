@@ -66,7 +66,7 @@ func testClient() {
 	for {
 		// get pods in all the namespaces by omitting namespace
 		// Or specify namespace to get pods in particular namespace
-		pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
+		pods, err := clientset.CoreV1().Pods("test-shard-seikun-kambashi-westusc2").List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			panic(err.Error())
 		}
