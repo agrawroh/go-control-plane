@@ -19,14 +19,14 @@ import (
 	"encoding/base64"
 	"flag"
 	"io/ioutil"
-	"os"
 	"sync"
 
+	v2 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v2"
 	"github.com/envoyproxy/go-control-plane/internal/example"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/test/v3"
 	"github.com/ulikunitz/xz"
+	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -61,6 +61,17 @@ func init() {
 
 	// Tell Envoy to use this Node ID
 	flag.StringVar(&nodeID, "nodeID", "test-id", "Node ID")
+}
+
+// parseYaml takes in a yaml envoy config string and returns a typed version
+func parseYaml(envoyYaml string) (*v2.Bootstrap, error) {
+	config := &v2.Bootstrap{}
+	err := yaml.Unmarshal([]byte(envoyYaml), config)
+	if err != nil {
+		return nil, err
+	}
+
+	return config, nil
 }
 
 func watchForChanges(clientset *kubernetes.Clientset, configmapKey *string, configmap *string, mutex *sync.Mutex) {
@@ -101,9 +112,10 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *strin
 						}
 						result, _ := ioutil.ReadAll(r)
 						envoyConfigString := string(result)
+						config := parseYaml(envoyConfigString)
 						*configmapKey = key
 						*configmap = envoyConfigString
-						l.Debugf("[databricks-envoy-cp] %s", envoyConfigString)
+						l.Debugf("[databricks-envoy-cp] %s", config)
 					}
 				}
 				mutex.Unlock()
@@ -165,27 +177,13 @@ func main() {
 	// Create a cache
 	cache := cache.NewSnapshotCache(false, cache.IDHash{}, l)
 
-	// Create the snapshot that we'll serve to Envoy
-	snapshot := example.GenerateSnapshot()
-	if err := snapshot.Consistent(); err != nil {
-		l.Errorf("snapshot inconsistency: %+v\n%+v", snapshot, err)
-		os.Exit(1)
-	}
-	l.Debugf("will serve snapshot %+v", snapshot)
-
-	// Add the snapshot to the cache
-	if err := cache.SetSnapshot(nodeID, snapshot); err != nil {
-		l.Errorf("snapshot error %q for %+v", err, snapshot)
-		os.Exit(1)
-	}
-
 	l.Debugf("[databricks-envoy-cp] testing k8s client")
 	testClient()
 
 	l.Debugf("[databricks-envoy-cp] running server")
 	// Run the xDS server
 	ctx := context.Background()
-	cb := &test.Callbacks{Debug: l.Debug}
-	srv := server.NewServer(ctx, cache, cb)
+	// cb := &test.Callbacks{Debug: l.Debug}
+	srv := server.NewServer(ctx, cache, nil)
 	example.RunServer(ctx, srv, port)
 }
