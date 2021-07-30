@@ -21,7 +21,7 @@ import (
 	"io/ioutil"
 	"sync"
 
-	v2 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v2"
+	v3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	"github.com/envoyproxy/go-control-plane/internal/example"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
@@ -64,8 +64,9 @@ func init() {
 }
 
 // parseYaml takes in a yaml envoy config string and returns a typed version
-func parseYaml(envoyYaml string) (*v2.Bootstrap, error) {
-	config := &v2.Bootstrap{}
+func parseYaml(envoyYaml string) (*v3.Bootstrap, error) {
+	l.Debugf("[databricks-envoy-cp] yaml: %s", envoyYaml)
+	config := &v3.Bootstrap{}
 	err := yaml.Unmarshal([]byte(envoyYaml), config)
 	if err != nil {
 		return nil, err
@@ -112,10 +113,14 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *strin
 						}
 						result, _ := ioutil.ReadAll(r)
 						envoyConfigString := string(result)
-						config := parseYaml(envoyConfigString)
+						config, err := parseYaml(envoyConfigString)
+						if err != nil {
+							l.Errorf("Error parsing yaml string: %s ", err.Error())
+							return
+						}
 						*configmapKey = key
 						*configmap = envoyConfigString
-						l.Debugf("[databricks-envoy-cp] %s", config)
+						l.Debugf("[databricks-envoy-cp] pb: %s", config)
 					}
 				}
 				mutex.Unlock()
