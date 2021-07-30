@@ -102,7 +102,7 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *strin
 							return
 						}
 						result, _ := ioutil.ReadAll(r)
-						envoyConfigString = string(result)
+						envoyConfigString := string(result)
 						*configmapKey = key
 						*configmap = envoyConfigString
 						l.Debugf("[databricks-envoy-cp] %s", envoyConfigString)
