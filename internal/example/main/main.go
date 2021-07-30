@@ -18,9 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"flag"
-	"fmt"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"sync"
 
@@ -157,17 +155,6 @@ func testClient() {
 	l.Debugf("[databricks-envoy-cp] setup watcher")
 	mutex = &sync.Mutex{}
 	go watchForChanges(clientset, &currentConfigmapKey, &currentConfigmap, mutex)
-
-	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
-		mutex.Lock()
-		body := []byte(fmt.Sprintf(`{"current_configmap_key": "%s"}`, currentConfigmapKey))
-		mutex.Unlock()
-		w.WriteHeader(http.StatusOK)
-		w.Write(body)
-	})
-
-	l.Debugf("Listening on port 8080\n")
-	http.ListenAndServe(":8080", nil)
 }
 
 func main() {
