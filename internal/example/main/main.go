@@ -22,7 +22,7 @@ import (
 	"strings"
 	"sync"
 
-	v3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
+	v2 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v2"
 	"github.com/envoyproxy/go-control-plane/internal/example"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
@@ -66,7 +66,7 @@ func init() {
 }
 
 // parseYaml takes in a yaml envoy config string and returns a typed version
-func parseYaml(yamlString string) (*v3.Bootstrap, error) {
+func parseYaml(yamlString string) (*v2.Bootstrap, error) {
 	l.Debugf("[databricks-envoy-cp] converting yaml to json")
 	jsonString, err := yaml.YAMLToJSON([]byte(yamlString))
 	if err != nil {
@@ -74,7 +74,7 @@ func parseYaml(yamlString string) (*v3.Bootstrap, error) {
 	}
 
 	l.Debugf("[databricks-envoy-cp] converting json to pb")
-	config := &v3.Bootstrap{}
+	config := &v2.Bootstrap{}
 	r := strings.NewReader(string(jsonString))
 	err = jsonpb.Unmarshal(r, config)
 	// err := yaml.Unmarshal([]byte(envoyYaml), config)
