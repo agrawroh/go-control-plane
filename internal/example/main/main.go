@@ -25,13 +25,14 @@ import (
 	"github.com/envoyproxy/go-control-plane/internal/example"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/gogo/protobuf/jsonpb"
 	"github.com/ulikunitz/xz"
-	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -64,10 +65,19 @@ func init() {
 }
 
 // parseYaml takes in a yaml envoy config string and returns a typed version
-func parseYaml(envoyYaml string) (*v3.Bootstrap, error) {
-	l.Debugf("[databricks-envoy-cp] yaml: %s", envoyYaml)
+func parseYaml(yamlString string) (*v3.Bootstrap, error) {
+	l.Debugf("[databricks-envoy-cp] converting yaml to json")
+	jsonString, err := yaml.YAMLToJSON(yamlString)
+	if err != nil {
+		return nil, err
+	}
+
+	l.Debugf("[databricks-envoy-cp] converting json: %s", string(jsonString))
+
 	config := &v3.Bootstrap{}
-	err := yaml.Unmarshal([]byte(envoyYaml), config)
+
+	err := jsonpb.Unmarshal([]byte(string(jsonString)), config)
+	// err := yaml.Unmarshal([]byte(envoyYaml), config)
 	if err != nil {
 		return nil, err
 	}
