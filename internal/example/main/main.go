@@ -77,7 +77,7 @@ func parseYaml(yamlString string) (*v3.Bootstrap, error) {
 
 	config := &v3.Bootstrap{}
 	r := strings.NewReader(string(jsonString))
-	err := jsonpb.Unmarshal(r, config)
+	err = jsonpb.Unmarshal(r, config)
 	// err := yaml.Unmarshal([]byte(envoyYaml), config)
 	if err != nil {
 		return nil, err
