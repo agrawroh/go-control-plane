@@ -68,7 +68,7 @@ func init() {
 // parseYaml takes in a yaml envoy config string and returns a typed version
 func parseYaml(yamlString string) (*v3.Bootstrap, error) {
 	l.Debugf("[databricks-envoy-cp] converting yaml to json")
-	jsonString, err := yaml.YAMLToJSON(yamlString)
+	jsonString, err := yaml.YAMLToJSON([]byte(yamlString))
 	if err != nil {
 		return nil, err
 	}
