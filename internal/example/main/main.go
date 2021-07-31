@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"flag"
 	"io/ioutil"
+	"strings"
 	"sync"
 
 	v3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
@@ -75,8 +76,8 @@ func parseYaml(yamlString string) (*v3.Bootstrap, error) {
 	l.Debugf("[databricks-envoy-cp] converting json: %s", string(jsonString))
 
 	config := &v3.Bootstrap{}
-
-	err := jsonpb.Unmarshal([]byte(string(jsonString)), config)
+	r := strings.NewReader(string(jsonString))
+	err := jsonpb.Unmarshal(r, config)
 	// err := yaml.Unmarshal([]byte(envoyYaml), config)
 	if err != nil {
 		return nil, err
