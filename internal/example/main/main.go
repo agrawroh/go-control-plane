@@ -73,8 +73,7 @@ func parseYaml(yamlString string) (*v3.Bootstrap, error) {
 		return nil, err
 	}
 
-	l.Debugf("[databricks-envoy-cp] converting json: %s", string(jsonString))
-
+	l.Debugf("[databricks-envoy-cp] converting json to pb")
 	config := &v3.Bootstrap{}
 	r := strings.NewReader(string(jsonString))
 	err = jsonpb.Unmarshal(r, config)
