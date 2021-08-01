@@ -17,33 +17,37 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"io/ioutil"
 	"os"
 	"sync"
 
-	v3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/config/rbac/v3"
+	v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
-	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dynamic_forward_proxy/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dynamic_forward_proxy/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/compression/gzip/compressor/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/compression/gzip/decompressor/v3"
-	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/ext_authz/v3"
-	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/compressor/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_forward_proxy/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ratelimit/v3"
-	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/compressor/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
-	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_forward_proxy/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/ext_authz/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
-	_ "github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/envoyproxy/go-control-plane/internal/example"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	_ "github.com/golang/protobuf/ptypes/wrappers"
+	"github.com/itchyny/gojq"
 	"github.com/ulikunitz/xz"
 	"google.golang.org/protobuf/encoding/protojson"
 	corev1 "k8s.io/api/core/v1"
@@ -91,20 +95,20 @@ func parseYaml(yamlString string) ([]byte, error) {
 	return jsonString, nil
 }
 
-func convertJsonToPb(jsonString string) (*v3.Bootstrap, error) {
-	l.Debugf("[databricks-envoy-cp] *** JSON ---> PB ***")
-	config := &v3.Bootstrap{}
+func convertJsonToPb(jsonString string) (*v3.RouteConfiguration, error) {
+	l.Debugf("Converting JSON ---> PB ***")
+	config := &v3.RouteConfiguration{}
 	err := protojson.Unmarshal([]byte(jsonString), config)
 	// err := yaml.Unmarshal([]byte(envoyYaml), config)
-	l.Errorf("Error while converting JSON -> PB: %s ", err.Error())
 	if err != nil {
+		l.Errorf("Error while converting JSON -> PB: %s ", err.Error())
 		return nil, err
 	}
-	l.Debugf("[databricks-envoy-cp] *** SUCCESS *** PB: %s", config)
+	l.Debugf("*** SUCCESS ***")
 	return config, nil
 }
 
-func watchForChanges(clientset *kubernetes.Clientset, configmapKey *string, configmap *string, mutex *sync.Mutex) {
+func watchForChanges(clientset *kubernetes.Clientset, snapshotCache *cache.SnapshotCache, configmapKey *string, configmap *string, mutex *sync.Mutex) {
 	for {
 		namespace := os.Getenv("CONFIG_MAP_NAMESPACE")
 		watcher, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(),
@@ -113,13 +117,14 @@ func watchForChanges(clientset *kubernetes.Clientset, configmapKey *string, conf
 				Namespace: namespace,
 			}))
 		if err != nil {
+			l.Errorf("Error occurred while creating the watcher: %s", err)
 			panic("Unable to create watcher")
 		}
-		updateCurrentConfigmap(watcher.ResultChan(), configmapKey, configmap, mutex)
+		updateCurrentConfigmap(watcher.ResultChan(), snapshotCache, configmapKey, configmap, mutex)
 	}
 }
 
-func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *string, configmap *string, mutex *sync.Mutex) {
+func updateCurrentConfigmap(eventChannel <-chan watch.Event, snapshotCache *cache.SnapshotCache, configmapKey *string, configmap *string, mutex *sync.Mutex) {
 	for {
 		event, open := <-eventChannel
 		if open {
@@ -128,11 +133,11 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *strin
 				fallthrough
 			case watch.Modified:
 				mutex.Lock()
-				l.Debugf("[databricks-envoy-cp] *** CONFIG MODIFIED ***")
+				l.Debugf("*** Envoy ConfigMap Modified ***")
 				// Update our configmap
 				if updatedMap, ok := event.Object.(*corev1.ConfigMap); ok {
 					for key, value := range updatedMap.Data {
-						l.Debugf("[databricks-envoy-cp] ConfigMap Name: %s", key)
+						l.Debugf("ConfigMap Name: %s", key)
 						xzString, err := base64.StdEncoding.DecodeString(value)
 						if err != nil {
 							l.Errorf("Error decoding string: %s ", err.Error())
@@ -141,7 +146,7 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *strin
 
 						r, err := xz.NewReader(bytes.NewReader(xzString))
 						if err != nil {
-							l.Errorf("Error decompressing string: %s ", err.Error())
+							l.Errorf("Error decompressing string: %s", err.Error())
 							return
 						}
 						result, _ := ioutil.ReadAll(r)
@@ -153,11 +158,33 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *strin
 								return
 							}
 						*/
-						l.Debugf("[databricks-envoy-cp] *** JSON: %s", envoyConfigString)
-						pb, err := convertJsonToPb(envoyConfigString)
+						l.Debugf("Extracting Routes From JSON ConfigMap...")
+						routesJson := extractRoutes(envoyConfigString)
+						l.Debugf("Successfully extracted routes from the Envoy ConfigMap!")
+						pb, err := convertJsonToPb(routesJson)
 						*configmapKey = key
-						*configmap = envoyConfigString
-						l.Debugf("[databricks-envoy-cp] *** PB: %s", pb)
+						*configmap = routesJson
+						l.Debugf("*** Final PB: %s", pb)
+						if err == nil {
+							newSnapshot := cache.NewSnapshot(
+								"1",
+								[]types.Resource{},   // endpoints
+								[]types.Resource{},   // clusters
+								[]types.Resource{pb}, // routes
+								[]types.Resource{},   // HCM
+								[]types.Resource{},   // runtimes
+								[]types.Resource{},   // secrets
+								//[]types.Resource{}, // extension configs
+							)
+							l.Debugf("*** SETTING SNAPSHOT ***")
+							if err := (*snapshotCache).SetSnapshot(nodeID, newSnapshot); err != nil {
+								l.Errorf("Snapshot Error %q for %+v", err, newSnapshot)
+								os.Exit(1)
+							}
+							l.Debugf("*** DONE ***")
+						} else {
+							l.Errorf("Unmarshalling Error: %s", err.Error())
+						}
 					}
 				}
 				mutex.Unlock()
@@ -177,7 +204,62 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, configmapKey *strin
 	}
 }
 
-func testClient() {
+func extractRoutes(jsonConfig string) string {
+	query, err := gojq.Parse(".route_config")
+	if err != nil {
+		l.Debugf("Error occurred while extracting Routes: %s", err)
+	}
+	jsonMap := make(map[string]interface{})
+	err = json.Unmarshal([]byte(jsonConfig), &jsonMap)
+	if err != nil {
+		l.Debugf("Error occurred while unmarshalling Routes JSON: %s", err)
+	}
+	iter := query.Run(jsonMap) // or query.RunWithContext
+	routes, ok := iter.Next()
+	if !ok {
+		l.Debugf("Not OK!")
+		return ""
+	}
+	if err, ok := routes.(error); ok {
+		l.Debugf("Error occurred: %s", err)
+	}
+	routesString, err := json.Marshal(routes)
+	if err != nil {
+		l.Debugf("Error occurred while marshalling: %s", err)
+	}
+	return string(routesString)
+}
+
+func initKubernetesClient() *kubernetes.Clientset {
+	l.Debugf("Initializing Kubernetes Client...")
+	// Create In-Cluster Config
+	inClusterConfig, err := rest.InClusterConfig()
+	if err != nil {
+		l.Debugf("Error occurred while creating in-cluster config. %s", err)
+		panic(err.Error())
+	}
+	// Create ClientSet
+	clientset, err := kubernetes.NewForConfig(inClusterConfig)
+	if err != nil {
+		l.Debugf("Error occurred while creating new client-set. %s", err)
+		panic(err.Error())
+	}
+
+	// Sanity Check(s) [We can list pods]
+	namespace := os.Getenv("CONFIG_MAP_NAMESPACE")
+	l.Debugf("Listing existing K8S pods in the namespace: %s", namespace)
+	pods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		l.Debugf("Error occurred while listing pods.", err.Error())
+		panic(err.Error())
+	}
+	l.Debugf("There are %d pods in the given namespace.", len(pods.Items))
+
+	// Return Clientset
+	return clientset
+}
+
+func setupWatcher(clientset *kubernetes.Clientset, snapshotCache *cache.SnapshotCache) {
 	var (
 		currentConfigmapKey string
 		currentConfigmap    string
@@ -186,47 +268,57 @@ func testClient() {
 	currentConfigmapKey = DEFAULT_CONFIGMAP_KEY
 	currentConfigmap = DEFAULT_CONFIGMAP
 
-	l.Debugf("[databricks-envoy-cp] init k8s client")
-	// creates the in-cluster config
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		panic(err.Error())
-	}
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	l.Debugf("[databricks-envoy-cp] k8s client try list pods")
-	// Sanity check we can list pods
-	namespace := os.Getenv("CONFIG_MAP_NAMESPACE")
-	pods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		panic(err.Error())
-	}
-	l.Debugf("[databricks-envoy-cp] There are %d pods in the cluster\n", len(pods.Items))
-
-	l.Debugf("[databricks-envoy-cp] setup watcher")
+	l.Debugf("Start setting up the config-map watcher...")
 	mutex = &sync.Mutex{}
-	go watchForChanges(clientset, &currentConfigmapKey, &currentConfigmap, mutex)
+	go watchForChanges(clientset, snapshotCache, &currentConfigmapKey, &currentConfigmap, mutex)
 }
+
+/*
+func test(c cache.SnapshotCache) {
+	result, err := ioutil.ReadFile("/Users/rohit.agrawal/universe/apiproxy/deploy/multitenant/zzz_JSONNET_GENERATED/dev/oregon-dev/mt-shard/apiproxy.yaml")
+	if err == nil {
+		envoyConfigString := string(result)
+		routesJson := extractRoutes(envoyConfigString)
+		l.Debugf("[databricks-envoy-cp] *** Routes: %s", routesJson)
+		pb, _ := convertJsonToPb(routesJson)
+		snapshot := cache.NewSnapshot(
+			"1",
+			[]types.Resource{},   // endpoints
+			[]types.Resource{},   // clusters
+			[]types.Resource{pb}, // routes
+			[]types.Resource{},   // HCM
+			[]types.Resource{},   // runtimes
+			[]types.Resource{},   // secrets
+			//[]types.Resource{},   // extension configs
+		)
+		if err := c.SetSnapshot(nodeID, snapshot); err != nil {
+			l.Errorf("Snapshot error %q for %+v", err, snapshot)
+			os.Exit(1)
+		}
+	} else {
+		l.Debugf("[databricks-envoy-cp] *** ERROR: %s", err)
+	}
+}
+*/
 
 func main() {
 	flag.Parse()
+	l.Debugf("Start Initializing xDS Main Server...")
 
-	l.Debugf("[databricks-envoy-cp] init")
+	// Create Snapshot Cache
+	// true = ADS Mode
+	snapshotCache := cache.NewSnapshotCache(false, cache.IDHash{}, l)
 
-	// Create a cache
-	cache := cache.NewSnapshotCache(false, cache.IDHash{}, l)
+	// Initialize Kubernetes Client
+	clientset := initKubernetesClient()
 
-	l.Debugf("[databricks-envoy-cp] testing k8s client")
-	testClient()
+	// Setup ConfigMap Watcher
+	setupWatcher(clientset, &snapshotCache)
 
-	l.Debugf("[databricks-envoy-cp] running server")
 	// Run the xDS server
+	l.Debugf("Running xDS Server...")
 	ctx := context.Background()
 	// cb := &test.Callbacks{Debug: l.Debug}
-	srv := server.NewServer(ctx, cache, nil)
+	srv := server.NewServer(ctx, snapshotCache, nil)
 	example.RunServer(ctx, srv, port)
 }
