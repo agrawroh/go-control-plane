@@ -1,16 +1,3 @@
-// Copyright 2020 Envoyproxy Authors
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//   You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
 package main
 
 import (
@@ -21,9 +8,12 @@ import (
 	"flag"
 	"io/ioutil"
 	"os"
+	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
+	v3Cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/config/rbac/v3"
 	v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
@@ -76,10 +66,10 @@ var (
 func init() {
 	l = example.Logger{}
 
-	flag.BoolVar(&l.Debug, "debug", false, "Enable xDS server debug logging")
+	flag.BoolVar(&l.Debug, "debug", false, "Enable xDS Server Debug Logging")
 
 	// The port that this xDS server listens on
-	flag.UintVar(&port, "port", 18000, "xDS management server port")
+	flag.UintVar(&port, "port", 18000, "xDS Management Server Port")
 
 	// Tell Envoy to use this Node ID
 	flag.StringVar(&nodeID, "nodeID", "test-id", "Node ID")
@@ -87,7 +77,7 @@ func init() {
 
 // parseYaml takes in a yaml envoy config string and returns a typed version
 func parseYaml(yamlString string) ([]byte, error) {
-	l.Debugf("[databricks-envoy-cp] *** YAML ---> JSON ***")
+	l.Debugf("***** YAML ---> JSON *****")
 	jsonString, err := yaml.YAMLToJSON([]byte(yamlString))
 	if err != nil {
 		return nil, err
@@ -96,7 +86,7 @@ func parseYaml(yamlString string) ([]byte, error) {
 }
 
 func convertJsonToPb(jsonString string) (*v3.RouteConfiguration, error) {
-	l.Debugf("Converting JSON ---> PB ***")
+	l.Debugf("***** Converting JSON ---> PB *****")
 	config := &v3.RouteConfiguration{}
 	err := protojson.Unmarshal([]byte(jsonString), config)
 	// err := yaml.Unmarshal([]byte(envoyYaml), config)
@@ -108,23 +98,93 @@ func convertJsonToPb(jsonString string) (*v3.RouteConfiguration, error) {
 	return config, nil
 }
 
-func watchForChanges(clientset *kubernetes.Clientset, snapshotCache *cache.SnapshotCache, configmapKey *string, configmap *string, mutex *sync.Mutex) {
+func watchForChanges(clientset *kubernetes.Clientset, snapshotCache *cache.SnapshotCache, configmapKey, configmap *string, clustersResource, routesResource *[]types.Resource, mutex *sync.Mutex) {
 	for {
-		namespace := os.Getenv("CONFIG_MAP_NAMESPACE")
-		watcher, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(),
-			metav1.SingleObject(metav1.ObjectMeta{
-				Name:      os.Getenv("CONFIG_MAP_NAME"),
-				Namespace: namespace,
-			}))
+		watcher, err := clientset.CoreV1().ConfigMaps(corev1.NamespaceAll).Watch(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			l.Errorf("Error occurred while creating the watcher: %s", err)
-			panic("Unable to create watcher")
+			panic("Unable to create the watcher!")
 		}
-		updateCurrentConfigmap(watcher.ResultChan(), snapshotCache, configmapKey, configmap, mutex)
+		updateCurrentConfigmap(watcher.ResultChan(), snapshotCache, configmapKey, configmap, clustersResource, routesResource, mutex)
 	}
 }
 
-func updateCurrentConfigmap(eventChannel <-chan watch.Event, snapshotCache *cache.SnapshotCache, configmapKey *string, configmap *string, mutex *sync.Mutex) {
+func updateRoutesConfig(routesResource *[]types.Resource, configMap *corev1.ConfigMap, configmapKey, configmap *string) error {
+	var err error
+	for key, value := range configMap.Data {
+		l.Debugf("ConfigMap Key: %s", key)
+		xzString, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			l.Errorf("Error decoding string: %s ", err.Error())
+			return err
+		}
+
+		r, err := xz.NewReader(bytes.NewReader(xzString))
+		if err != nil {
+			l.Errorf("Error decompressing string: %s", err.Error())
+			return err
+		}
+		result, _ := ioutil.ReadAll(r)
+		envoyConfigString := string(result)
+		/*
+			config, err := parseYaml(envoyConfigString)
+			if err != nil {
+				l.Errorf("Error parsing yaml string: %s ", err.Error())
+				return
+			}
+		*/
+		l.Debugf("Extracting Routes From JSON ConfigMap...")
+		routesJson := extractData(envoyConfigString, ".route_config")
+		l.Debugf("Successfully extracted routes from the Envoy ConfigMap!")
+		pb, err := convertJsonToPb(routesJson)
+		*routesResource = make([]types.Resource, 1)
+		(*routesResource)[0] = pb
+		*configmapKey = key
+		*configmap = routesJson
+		l.Debugf("*** Final PB: %s", pb)
+	}
+	return err
+}
+
+func updateClustersConfig(clustersResource *[]types.Resource, configMap *corev1.ConfigMap) error {
+	var err error
+	for key, value := range configMap.Data {
+		l.Debugf("ConfigMap Key: %s", key)
+		xzString, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			l.Errorf("Error decoding string: %s ", err.Error())
+			return err
+		}
+
+		r, err := xz.NewReader(bytes.NewReader(xzString))
+		if err != nil {
+			l.Errorf("Error decompressing string: %s", err.Error())
+			return err
+		}
+		result, _ := ioutil.ReadAll(r)
+		envoyConfigString := string(result)
+		clustersJson := extractData(envoyConfigString, ".cluster_config")
+		l.Debugf("*** Clusters: %s", clustersJson)
+		var clustersJsonArray []interface{}
+		err = json.Unmarshal([]byte(clustersJson), &clustersJsonArray)
+		if err != nil {
+			l.Debugf("Error occurred while unmarshalling clusters array: %s", err)
+		}
+		*clustersResource = make([]types.Resource, len(clustersJsonArray))
+		for index, clusterJson := range clustersJsonArray {
+			clusterJsonString, err := json.Marshal(clusterJson)
+			if err != nil {
+				l.Debugf("Error occurred while marshalling: %s", err)
+			}
+			pb, _ := convertClustersJsonToPb(string(clusterJsonString))
+			(*clustersResource)[index] = pb
+			l.Debugf("*** PB: %s", pb)
+		}
+	}
+	return err
+}
+
+func updateCurrentConfigmap(eventChannel <-chan watch.Event, snapshotCache *cache.SnapshotCache, configmapKey, configmap *string, clustersResource, routesResource *[]types.Resource, mutex *sync.Mutex) {
 	for {
 		event, open := <-eventChannel
 		if open {
@@ -132,59 +192,40 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, snapshotCache *cach
 			case watch.Added:
 				fallthrough
 			case watch.Modified:
-				mutex.Lock()
 				l.Debugf("*** Envoy ConfigMap Modified ***")
+				mutex.Lock()
 				// Update our configmap
-				if updatedMap, ok := event.Object.(*corev1.ConfigMap); ok {
-					for key, value := range updatedMap.Data {
-						l.Debugf("ConfigMap Name: %s", key)
-						xzString, err := base64.StdEncoding.DecodeString(value)
-						if err != nil {
-							l.Errorf("Error decoding string: %s ", err.Error())
-							return
+				if configMap, ok := event.Object.(*corev1.ConfigMap); ok {
+					configmapName := configMap.Name
+					//configmapNamespace := configMap.Namespace
+					var err error
+					if strings.Contains(configmapName, "-envoy-routes-config") {
+						l.Debugf("*** Updating Routes ***")
+						err = updateRoutesConfig(routesResource, configMap, configmapKey, configmap)
+					}
+					if strings.Contains(configmapName, "-envoy-clusters-config") {
+						l.Debugf("*** Updating Clusters ***")
+						err = updateClustersConfig(clustersResource, configMap)
+					}
+					if err == nil {
+						newSnapshot := cache.NewSnapshot(
+							time.Now().Format("2006-01-02-15-04-05"),
+							[]types.Resource{}, // endpoints
+							*clustersResource,  // clusters
+							*routesResource,    // routes
+							[]types.Resource{}, // HCM
+							[]types.Resource{}, // runtimes
+							[]types.Resource{}, // secrets
+							//[]types.Resource{}, // extension configs
+						)
+						l.Debugf("*** SETTING SNAPSHOT ***")
+						if err := (*snapshotCache).SetSnapshot(nodeID, newSnapshot); err != nil {
+							l.Errorf("Snapshot Error %q for %+v", err, newSnapshot)
+							os.Exit(1)
 						}
-
-						r, err := xz.NewReader(bytes.NewReader(xzString))
-						if err != nil {
-							l.Errorf("Error decompressing string: %s", err.Error())
-							return
-						}
-						result, _ := ioutil.ReadAll(r)
-						envoyConfigString := string(result)
-						/*
-							config, err := parseYaml(envoyConfigString)
-							if err != nil {
-								l.Errorf("Error parsing yaml string: %s ", err.Error())
-								return
-							}
-						*/
-						l.Debugf("Extracting Routes From JSON ConfigMap...")
-						routesJson := extractRoutes(envoyConfigString)
-						l.Debugf("Successfully extracted routes from the Envoy ConfigMap!")
-						pb, err := convertJsonToPb(routesJson)
-						*configmapKey = key
-						*configmap = routesJson
-						l.Debugf("*** Final PB: %s", pb)
-						if err == nil {
-							newSnapshot := cache.NewSnapshot(
-								"1",
-								[]types.Resource{},   // endpoints
-								[]types.Resource{},   // clusters
-								[]types.Resource{pb}, // routes
-								[]types.Resource{},   // HCM
-								[]types.Resource{},   // runtimes
-								[]types.Resource{},   // secrets
-								//[]types.Resource{}, // extension configs
-							)
-							l.Debugf("*** SETTING SNAPSHOT ***")
-							if err := (*snapshotCache).SetSnapshot(nodeID, newSnapshot); err != nil {
-								l.Errorf("Snapshot Error %q for %+v", err, newSnapshot)
-								os.Exit(1)
-							}
-							l.Debugf("*** DONE ***")
-						} else {
-							l.Errorf("Unmarshalling Error: %s", err.Error())
-						}
+						l.Debugf("*** DONE ***")
+					} else {
+						l.Errorf("Unmarshalling Error: %s", err.Error())
 					}
 				}
 				mutex.Unlock()
@@ -204,15 +245,15 @@ func updateCurrentConfigmap(eventChannel <-chan watch.Event, snapshotCache *cach
 	}
 }
 
-func extractRoutes(jsonConfig string) string {
-	query, err := gojq.Parse(".route_config")
+func extractData(jsonConfig, queryString string) string {
+	query, err := gojq.Parse(queryString)
 	if err != nil {
-		l.Debugf("Error occurred while extracting Routes: %s", err)
+		l.Debugf("Error occurred while extracting Data: %s", err)
 	}
 	jsonMap := make(map[string]interface{})
 	err = json.Unmarshal([]byte(jsonConfig), &jsonMap)
 	if err != nil {
-		l.Debugf("Error occurred while unmarshalling Routes JSON: %s", err)
+		l.Debugf("Error occurred while unmarshalling JSON: %s", err)
 	}
 	iter := query.Run(jsonMap) // or query.RunWithContext
 	routes, ok := iter.Next()
@@ -246,14 +287,12 @@ func initKubernetesClient() *kubernetes.Clientset {
 	}
 
 	// Sanity Check(s) [We can list pods]
-	namespace := os.Getenv("CONFIG_MAP_NAMESPACE")
-	l.Debugf("Listing existing K8S pods in the namespace: %s", namespace)
-	pods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+	pods, err := clientset.CoreV1().Pods(corev1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		l.Debugf("Error occurred while listing pods.", err.Error())
 		panic(err.Error())
 	}
-	l.Debugf("There are %d pods in the given namespace.", len(pods.Items))
+	l.Debugf("There are %d pods across all the namespace(s).", len(pods.Items))
 
 	// Return Clientset
 	return clientset
@@ -263,6 +302,8 @@ func setupWatcher(clientset *kubernetes.Clientset, snapshotCache *cache.Snapshot
 	var (
 		currentConfigmapKey string
 		currentConfigmap    string
+		clustersResource    []types.Resource
+		routesResource      []types.Resource
 		mutex               *sync.Mutex
 	)
 	currentConfigmapKey = DEFAULT_CONFIGMAP_KEY
@@ -270,7 +311,20 @@ func setupWatcher(clientset *kubernetes.Clientset, snapshotCache *cache.Snapshot
 
 	l.Debugf("Start setting up the config-map watcher...")
 	mutex = &sync.Mutex{}
-	go watchForChanges(clientset, snapshotCache, &currentConfigmapKey, &currentConfigmap, mutex)
+	go watchForChanges(clientset, snapshotCache, &currentConfigmapKey, &currentConfigmap, &clustersResource, &routesResource, mutex)
+}
+
+func convertClustersJsonToPb(jsonString string) (*v3Cluster.Cluster, error) {
+	l.Debugf("Converting JSON ---> PB ***")
+	config := &v3Cluster.Cluster{}
+	err := protojson.Unmarshal([]byte(jsonString), config)
+	// err := yaml.Unmarshal([]byte(envoyYaml), config)
+	if err != nil {
+		l.Errorf("Error while converting JSON -> PB: %s ", err.Error())
+		return nil, err
+	}
+	l.Debugf("*** SUCCESS ***")
+	return config, nil
 }
 
 /*
@@ -278,25 +332,40 @@ func test(c cache.SnapshotCache) {
 	result, err := ioutil.ReadFile("/Users/rohit.agrawal/universe/apiproxy/deploy/multitenant/zzz_JSONNET_GENERATED/dev/oregon-dev/mt-shard/apiproxy.yaml")
 	if err == nil {
 		envoyConfigString := string(result)
-		routesJson := extractRoutes(envoyConfigString)
-		l.Debugf("[databricks-envoy-cp] *** Routes: %s", routesJson)
-		pb, _ := convertJsonToPb(routesJson)
+		clustersJson := extractData(envoyConfigString, ".cluster_config")
+		l.Debugf("*** Clusters: %s", clustersJson)
+		var clustersJsonArray []interface{}
+		err = json.Unmarshal([]byte(clustersJson), &clustersJsonArray)
+		if err != nil {
+			l.Debugf("Error occurred while unmarshalling clusters array: %s", err)
+		}
+		clusters := make([]types.Resource, len(clustersJsonArray))
+		for index, clusterJson := range clustersJsonArray {
+			clusterJsonString, err := json.Marshal(clusterJson)
+			if err != nil {
+				l.Debugf("Error occurred while marshalling: %s", err)
+			}
+			pb, _ := convertClustersJsonToPb(string(clusterJsonString))
+			clusters[index] = pb
+			l.Debugf("*** PB: %s", pb)
+		}
 		snapshot := cache.NewSnapshot(
 			"1",
-			[]types.Resource{},   // endpoints
-			[]types.Resource{},   // clusters
-			[]types.Resource{pb}, // routes
-			[]types.Resource{},   // HCM
-			[]types.Resource{},   // runtimes
-			[]types.Resource{},   // secrets
-			//[]types.Resource{},   // extension configs
+			[]types.Resource{}, // endpoints
+			clusters,           // clusters
+			[]types.Resource{}, // routes
+			[]types.Resource{}, // HCM
+			[]types.Resource{}, // runtimes
+			[]types.Resource{}, // secrets
+			//[]types.Resource{}, // extension configs
 		)
+		l.Debugf("***** !!! DONE !!! *****")
 		if err := c.SetSnapshot(nodeID, snapshot); err != nil {
 			l.Errorf("Snapshot error %q for %+v", err, snapshot)
 			os.Exit(1)
 		}
 	} else {
-		l.Debugf("[databricks-envoy-cp] *** ERROR: %s", err)
+		l.Debugf("*** ERROR: %s", err)
 	}
 }
 */
@@ -308,6 +377,7 @@ func main() {
 	// Create Snapshot Cache
 	// true = ADS Mode
 	snapshotCache := cache.NewSnapshotCache(false, cache.IDHash{}, l)
+	//test(snapshotCache)
 
 	// Initialize Kubernetes Client
 	clientset := initKubernetesClient()
