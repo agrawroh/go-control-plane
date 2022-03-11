@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/keepalive"
 
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -31,13 +30,14 @@ import (
 	runtimeservice "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
 	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"google.golang.org/grpc/keepalive"
 )
 
 const (
 	grpcKeepaliveTime        = 30 * time.Second
 	grpcKeepaliveTimeout     = 5 * time.Second
 	grpcKeepaliveMinTime     = 30 * time.Second
-	grpcMaxConcurrentStreams = 1000000
+	grpcMaxConcurrentStreams = 8
 )
 
 func registerServer(grpcServer *grpc.Server, server server.Server) {
@@ -78,7 +78,7 @@ func RunServer(ctx context.Context, srv server.Server, port uint) {
 
 	registerServer(grpcServer, srv)
 
-	log.Printf("management server listening on %d\n", port)
+	log.Printf("Management server listening on %d\n", port)
 	if err = grpcServer.Serve(lis); err != nil {
 		log.Println(err)
 	}
