@@ -126,15 +126,13 @@ func updateRoutesConfig(routesResource *[]types.Resource, index int, configMap *
 		}
 		result, _ := ioutil.ReadAll(r)
 		envoyConfigString := string(result)
-		/*
-			config, err := parseYaml(envoyConfigString)
-			if err != nil {
-				l.Errorf("Error parsing yaml string: %s ", err.Error())
-				return
-			}
-		*/
+		config, err := parseYaml(envoyConfigString)
+		if err != nil {
+			l.Errorf("Error parsing yaml string: %s ", err.Error())
+			return err
+		}
 		l.Debugf("Extracting Routes From JSON ConfigMap...")
-		routesJson := extractData(envoyConfigString, ".route_config")
+		routesJson := extractData(string(config), ".route_config")
 		l.Debugf("Successfully extracted routes from the Envoy ConfigMap!")
 		pb, err := convertJsonToPb(routesJson)
 		(*routesResource)[index] = pb
@@ -160,7 +158,12 @@ func updateClustersConfig(clustersResource *[]types.Resource, configMap *corev1.
 		}
 		result, _ := ioutil.ReadAll(r)
 		envoyConfigString := string(result)
-		clustersJson := extractData(envoyConfigString, ".cluster_config")
+		config, err := parseYaml(envoyConfigString)
+		if err != nil {
+			l.Errorf("Error parsing yaml string: %s ", err.Error())
+			return err
+		}
+		clustersJson := extractData(string(config), ".cluster_config")
 		l.Debugf("*** Clusters: %s", clustersJson)
 		var clustersJsonArray []interface{}
 		err = json.Unmarshal([]byte(clustersJson), &clustersJsonArray)
