@@ -8,10 +8,12 @@ import (
 
 type Settings struct {
 	// Environment Configuration
-	Port       int    `envconfig:"SERVICE_PORT_NUMBER" default:"11000"`
-	HttpPort   int    `envconfig:"SERVICE_HTTP_PORT_NUMBER" default:"8080"`
-	StatsDPort string `envconfig:"STATSD_PORT" default:"9125"`
-	StatsDHost string `envconfig:"STATSD_HOST" default:"localhost"`
+	Port              int    `envconfig:"SERVICE_PORT_NUMBER" default:"11000"`
+	HTTPPort          int    `envconfig:"SERVICE_HTTP_PORT_NUMBER" default:"8080"`
+	DebugPort         int    `envconfig:"SERVICE_DEBUG_PORT_NUMBER" default:"8081"`
+	StatsDPort        string `envconfig:"STATSD_PORT" default:"9125"`
+	StatsDHost        string `envconfig:"STATSD_HOST" default:"localhost"`
+	EnableDebugServer bool   `envconfig:"SERVICE_ENABLE_DEBUG_SERVER" default:"false"`
 
 	// ConfigMap(s)
 	ConfigMapNamespace                 string `envconfig:"CONFIG_MAP_NAMESPACE" default:"default"`
@@ -32,14 +34,14 @@ type Settings struct {
 	LogFormat    string `envconfig:"LOG_FORMAT" default:"text"`
 
 	// TLS Configuration
-	MinTlsVersion         string `envconfig:"MIN_TLS_VERSION" default:""`
-	MaxTlsVersion         string `envconfig:"MAX_TLS_VERSION" default:""`
+	MinTLSVersion         string `envconfig:"MIN_TLS_VERSION" default:"TLSv1.2"`
+	MaxTLSVersion         string `envconfig:"MAX_TLS_VERSION" default:"TLSv1.3"`
 	RequireClientCert     bool   `envconfig:"REQUIRE_CLIENT_CERT" default:"false"`
 	ServerCaPath          string `envconfig:"SERVER_CA_PATH" default:""`
 	ServerCertificatePath string `envconfig:"SERVER_CERT_PATH" default:""`
 	ServerKeyPath         string `envconfig:"SERVER_KEY_PATH" default:""`
-	ServerTls             bool   `envconfig:"SERVER_TLS" default:"false"`
-	ServerTlsConfig       *tls.Config
+	ServerTLS             bool   `envconfig:"SERVER_TLS" default:"false"`
+	ServerTLSConfig       *tls.Config
 }
 
 // NewSettings Parse environment variables and return settings object.

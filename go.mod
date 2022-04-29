@@ -8,6 +8,7 @@ require (
 	github.com/envoyproxy/protoc-gen-validate v0.6.7
 	github.com/golang/protobuf v1.5.2
 	github.com/google/go-cmp v0.5.7
+	github.com/gorilla/mux v1.8.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/lyft/gostats v0.4.7
 	github.com/pkg/errors v0.9.1
