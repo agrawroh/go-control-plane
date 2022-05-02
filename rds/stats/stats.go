@@ -6,153 +6,173 @@ import (
 	stats "github.com/lyft/gostats"
 )
 
-type PerConfigMapRdsStats struct {
+type RdsStatsByConfigMap struct {
 	configMapFetchErrorCount       stats.Counter
 	configMapParseErrorCount       stats.Counter
 	configMapParseSuccessCount     stats.Counter
 	configMapDataErrorCount        stats.Counter
 	configMapProcessedSuccessCount stats.Counter
-	configMapValuesCount           stats.Counter
+	configMapItemsCount            stats.Counter
 }
 
-type PerRouteTableRdsStats struct {
-	aggregatedRoutesCount          stats.Counter
+type RdsStatsByRouteTable struct {
+	// aggregatedRoutesCount consists of the total number of routes which are aggregated by the RDS from different
+	// sources.
+	aggregatedRoutesCount stats.Counter
+	// aggregatedVirtualClustersCount count consists of the total number of virtual clusters which are aggregated by the
+	// RDS from different sources.
 	aggregatedVirtualClustersCount stats.Counter
-	totalRoutesCount               stats.Counter
-	totalVirtualClustersCount      stats.Counter
-	createErrorCount               stats.Counter
-	createSuccessCount             stats.Counter
+	// totalRoutesCount consists of the total number of routes which are aggregated by the RDS from different sources
+	// and the routes which are statically received from the configuration ConfigMap.
+	// NOTE: totalRoutesCount >= aggregatedRoutesCount
+	totalRoutesCount stats.Counter
+	// totalVirtualClustersCount consists of the total number of virtual clusters which are aggregated by the RDS from
+	// different sources and the virtual clusters which are statically received from the configuration ConfigMap.
+	// NOTE: totalVirtualClustersCount >= aggregatedVirtualClustersCount
+	totalVirtualClustersCount stats.Counter
+	createErrorCount          stats.Counter
+	createSuccessCount        stats.Counter
 }
 
-type PerNodeRdsStats struct {
+type RdsStatsBySnapshot struct {
 	snapshotCacheUpdateSuccessCount stats.Counter
 	snapshotCacheUpdateErrorCount   stats.Counter
 }
 
 var (
-	perConfigMapCounters  = make(map[string]interface{})
-	perRouteTableCounters = make(map[string]interface{})
-	perNodeCounters       = make(map[string]interface{})
-	statsStore            = stats.NewDefaultStore()
-	serviceScope          = statsStore.Scope("rds_service")
+	countersByConfigMap  = make(map[string]RdsStatsByConfigMap)
+	countersByRouteTable = make(map[string]RdsStatsByRouteTable)
+	countersBySnapshot   = make(map[string]RdsStatsBySnapshot)
+	serviceScope         = stats.NewDefaultStore().Scope("rds_service")
+
+	makeCounterWithConfigMapNameTagFunc = func(counterName, configMapName string) stats.Counter {
+		return serviceScope.NewCounterWithTags(counterName, map[string]string{"configMapName": configMapName})
+	}
+	makeCounterWithRouteTableNameTagFunc = func(counterName, routeTableName string) stats.Counter {
+		return serviceScope.NewCounterWithTags(counterName, map[string]string{"routeTableName": routeTableName})
+	}
+	makeCounterWithNodeAndSnapshotTagsFunc = func(counterName, nodeId, snapshotVersion string) stats.Counter {
+		return serviceScope.NewCounterWithTags(counterName, map[string]string{"nodeId": nodeId, "snapshotVersion": snapshotVersion})
+	}
 )
 
 /**
- * Returns the counters with additional tags including the ConfigMap name.
+ * getCountersByConfigMap returns the counters with tag including the ConfigMap name.
  */
-func getPerConfigMapCounters(configMapName string) PerConfigMapRdsStats {
-	if perConfigMapCounters[configMapName] == nil {
-		perConfigMapCounters[configMapName] = PerConfigMapRdsStats{
-			configMapFetchErrorCount:       serviceScope.NewCounterWithTags("config_map_fetch_error_count", map[string]string{"configMapName": configMapName}),
-			configMapParseErrorCount:       serviceScope.NewCounterWithTags("config_map_parse_error_count", map[string]string{"configMapName": configMapName}),
-			configMapParseSuccessCount:     serviceScope.NewCounterWithTags("config_map_parse_success_count", map[string]string{"configMapName": configMapName}),
-			configMapDataErrorCount:        serviceScope.NewCounterWithTags("config_map_data_error_count", map[string]string{"configMapName": configMapName}),
-			configMapProcessedSuccessCount: serviceScope.NewCounterWithTags("config_map_processed_success_count", map[string]string{"configMapName": configMapName}),
-			configMapValuesCount:           serviceScope.NewCounterWithTags("config_map_values_count", map[string]string{"configMapName": configMapName}),
+func getCountersByConfigMap(configMapName string) RdsStatsByConfigMap {
+	if _, exists := countersByConfigMap[configMapName]; !exists {
+
+		countersByConfigMap[configMapName] = RdsStatsByConfigMap{
+			configMapFetchErrorCount:       makeCounterWithConfigMapNameTagFunc("config_map_fetch_error_count", configMapName),
+			configMapParseErrorCount:       makeCounterWithConfigMapNameTagFunc("config_map_parse_error_count", configMapName),
+			configMapParseSuccessCount:     makeCounterWithConfigMapNameTagFunc("config_map_parse_success_count", configMapName),
+			configMapDataErrorCount:        makeCounterWithConfigMapNameTagFunc("config_map_data_error_count", configMapName),
+			configMapProcessedSuccessCount: makeCounterWithConfigMapNameTagFunc("config_map_processed_success_count", configMapName),
+			configMapItemsCount:            makeCounterWithConfigMapNameTagFunc("config_map_items_count", configMapName),
 		}
 	}
-	return perConfigMapCounters[configMapName].(PerConfigMapRdsStats)
+	return countersByConfigMap[configMapName]
 }
 
 /**
- * Returns the counters with additional tags including the Route Table name.
+ * getCountersByRouteTable returns the counters with tag including the route table name.
  */
-func getPerRouteTableCounters(routeTableName string) PerRouteTableRdsStats {
-	if perRouteTableCounters[routeTableName] == nil {
-		perRouteTableCounters[routeTableName] = PerRouteTableRdsStats{
-			aggregatedRoutesCount:          serviceScope.NewCounterWithTags("route_table_aggregated_routes_count", map[string]string{"routeTableName": routeTableName}),
-			aggregatedVirtualClustersCount: serviceScope.NewCounterWithTags("route_table_aggregated_vc_count", map[string]string{"routeTableName": routeTableName}),
-			totalRoutesCount:               serviceScope.NewCounterWithTags("route_table_total_routes_count", map[string]string{"routeTableName": routeTableName}),
-			totalVirtualClustersCount:      serviceScope.NewCounterWithTags("route_table_total_vc_count", map[string]string{"routeTableName": routeTableName}),
-			createErrorCount:               serviceScope.NewCounterWithTags("route_table_create_error_count", map[string]string{"routeTableName": routeTableName}),
-			createSuccessCount:             serviceScope.NewCounterWithTags("route_table_create_success_count", map[string]string{"routeTableName": routeTableName}),
+func getCountersByRouteTable(routeTableName string) RdsStatsByRouteTable {
+	if _, exists := countersByRouteTable[routeTableName]; !exists {
+		countersByRouteTable[routeTableName] = RdsStatsByRouteTable{
+			aggregatedRoutesCount:          makeCounterWithRouteTableNameTagFunc("route_table_aggregated_routes_count", routeTableName),
+			aggregatedVirtualClustersCount: makeCounterWithRouteTableNameTagFunc("route_table_aggregated_vc_count", routeTableName),
+			totalRoutesCount:               makeCounterWithRouteTableNameTagFunc("route_table_total_routes_count", routeTableName),
+			totalVirtualClustersCount:      makeCounterWithRouteTableNameTagFunc("route_table_total_vc_count", routeTableName),
+			createErrorCount:               makeCounterWithRouteTableNameTagFunc("route_table_create_error_count", routeTableName),
+			createSuccessCount:             makeCounterWithRouteTableNameTagFunc("route_table_create_success_count", routeTableName),
 		}
 	}
-	return perRouteTableCounters[routeTableName].(PerRouteTableRdsStats)
+	return countersByRouteTable[routeTableName]
 }
 
 /**
- * Returns the counters with additional tags including the NodeId & Snapshot Version.
+ * getCountersBySnapshot returns the counters with tags including the client node id and snapshot cache version.
  */
-func getPerNodeCounters(nodeId, snapshotVersion string) PerNodeRdsStats {
+func getCountersBySnapshot(nodeId, snapshotVersion string) RdsStatsBySnapshot {
 	key := fmt.Sprintf("%s-%s", nodeId, snapshotVersion)
-	if perNodeCounters[key] == nil {
-		perNodeCounters[key] = PerNodeRdsStats{
-			snapshotCacheUpdateSuccessCount: serviceScope.NewCounterWithTags("snapshot_update_success_count", map[string]string{"nodeId": nodeId, "snapshotVersion": snapshotVersion}),
-			snapshotCacheUpdateErrorCount:   serviceScope.NewCounterWithTags("snapshot_update_error_count", map[string]string{"nodeId": nodeId, "snapshotVersion": snapshotVersion}),
+	if _, exists := countersBySnapshot[key]; !exists {
+		countersBySnapshot[key] = RdsStatsBySnapshot{
+			snapshotCacheUpdateSuccessCount: makeCounterWithNodeAndSnapshotTagsFunc("snapshot_update_success_count", nodeId, snapshotVersion),
+			snapshotCacheUpdateErrorCount:   makeCounterWithNodeAndSnapshotTagsFunc("snapshot_update_error_count", nodeId, snapshotVersion),
 		}
 	}
-	return perNodeCounters[key].(PerNodeRdsStats)
+	return countersBySnapshot[key]
 }
 
-// RecordConfigMapFetchError It records the number of times k8s failed to fetch a given ConfigMap.
+// RecordConfigMapFetchError records the number of times k8s failed to fetch a given ConfigMap.
 func RecordConfigMapFetchError(configMapName string) {
-	getPerConfigMapCounters(configMapName).configMapFetchErrorCount.Inc()
+	getCountersByConfigMap(configMapName).configMapFetchErrorCount.Inc()
 }
 
-// RecordConfigMapParseError It records the number of times we failed to parse a given ConfigMap.
+// RecordConfigMapParseError records the number of times we failed to parse a given ConfigMap.
 func RecordConfigMapParseError(configMapName string) {
-	getPerConfigMapCounters(configMapName).configMapParseErrorCount.Inc()
+	getCountersByConfigMap(configMapName).configMapParseErrorCount.Inc()
 }
 
-// RecordConfigMapParseSuccess It records the number of times we successfully parsed the given ConfigMap.
+// RecordConfigMapParseSuccess records the number of times we successfully parsed the given ConfigMap.
 func RecordConfigMapParseSuccess(configMapName string) {
-	getPerConfigMapCounters(configMapName).configMapParseSuccessCount.Inc()
+	getCountersByConfigMap(configMapName).configMapParseSuccessCount.Inc()
 }
 
-// RecordConfigMapDataError It records the number of times we were unable to unmarshall the contents of the given
+// RecordConfigMapDataError records the number of times we were unable to unmarshall the contents of the given
 // ConfigMap.
 func RecordConfigMapDataError(configMapName string) {
-	getPerConfigMapCounters(configMapName).configMapDataErrorCount.Inc()
+	getCountersByConfigMap(configMapName).configMapDataErrorCount.Inc()
 }
 
-// RecordConfigMapProcessedSuccessError It records the number of times we successfully processed the given ConfigMap
+// RecordConfigMapProcessedSuccessError records the number of times we successfully processed the given ConfigMap
 // end-to-end.
 func RecordConfigMapProcessedSuccessError(configMapName string) {
-	getPerConfigMapCounters(configMapName).configMapProcessedSuccessCount.Inc()
+	getCountersByConfigMap(configMapName).configMapProcessedSuccessCount.Inc()
 }
 
-// RecordConfigMapValues It records the number of routes or virtual cluster resources extracted from the given ConfigMap.
-func RecordConfigMapValues(configMapName string, count uint64) {
-	getPerConfigMapCounters(configMapName).configMapValuesCount.Add(count)
+// RecordConfigMapItems records the number of routes or virtual cluster resources extracted from the given ConfigMap.
+func RecordConfigMapItems(configMapName string, count uint64) {
+	getCountersByConfigMap(configMapName).configMapItemsCount.Add(count)
 }
 
-// RecordSnapshotCacheUpdateSuccess It records the number of times RDS was able to successfully update the snapshot.
+// RecordSnapshotCacheUpdateSuccess records the number of times RDS was able to successfully update the snapshot.
 func RecordSnapshotCacheUpdateSuccess(nodeId, snapshotVersion string) {
-	getPerNodeCounters(nodeId, snapshotVersion).snapshotCacheUpdateSuccessCount.Inc()
+	getCountersBySnapshot(nodeId, snapshotVersion).snapshotCacheUpdateSuccessCount.Inc()
 }
 
-// RecordSnapshotCacheUpdateError It records the number of times RDS was able to failed to update the snapshot cache.
+// RecordSnapshotCacheUpdateError records the number of times RDS was able to failed to update the snapshot cache.
 func RecordSnapshotCacheUpdateError(nodeId, snapshotVersion string) {
-	getPerNodeCounters(nodeId, snapshotVersion).snapshotCacheUpdateErrorCount.Inc()
+	getCountersBySnapshot(nodeId, snapshotVersion).snapshotCacheUpdateErrorCount.Inc()
 }
 
-// RecordRouteTableAggregatedRoutes It records the number of aggregated routes in the given Route Table.
+// RecordRouteTableAggregatedRoutes records the number of aggregated routes in the given Route Table.
 func RecordRouteTableAggregatedRoutes(routeTableName string, count uint64) {
-	getPerRouteTableCounters(routeTableName).aggregatedRoutesCount.Add(count)
+	getCountersByRouteTable(routeTableName).aggregatedRoutesCount.Add(count)
 }
 
-// RecordRouteTableAggregatedVirtualClusters It records the number of aggregated VCs in the given Route Table.
+// RecordRouteTableAggregatedVirtualClusters records the number of aggregated VCs in the given Route Table.
 func RecordRouteTableAggregatedVirtualClusters(routeTableName string, count uint64) {
-	getPerRouteTableCounters(routeTableName).aggregatedVirtualClustersCount.Add(count)
+	getCountersByRouteTable(routeTableName).aggregatedVirtualClustersCount.Add(count)
 }
 
-// RecordRouteTableTotalRoutes It records the number of total routes in the given Route Table after adding new routes.
+// RecordRouteTableTotalRoutes records the number of total routes in the given Route Table after adding new routes.
 func RecordRouteTableTotalRoutes(routeTableName string, count uint64) {
-	getPerRouteTableCounters(routeTableName).totalRoutesCount.Add(count)
+	getCountersByRouteTable(routeTableName).totalRoutesCount.Add(count)
 }
 
-// RecordRouteTableTotalVirtualClusters It records the number of total VCs in the given Route Table after adding new VCs.
+// RecordRouteTableTotalVirtualClusters records the number of total VCs in the given Route Table after adding new VCs.
 func RecordRouteTableTotalVirtualClusters(routeTableName string, count uint64) {
-	getPerRouteTableCounters(routeTableName).totalVirtualClustersCount.Add(count)
+	getCountersByRouteTable(routeTableName).totalVirtualClustersCount.Add(count)
 }
 
-// RecordRouteTableCreateSuccess It records the times the creation of given Route Table succeeded.
+// RecordRouteTableCreateSuccess records the times the creation of given Route Table succeeded.
 func RecordRouteTableCreateSuccess(routeTableName string) {
-	getPerRouteTableCounters(routeTableName).createSuccessCount.Inc()
+	getCountersByRouteTable(routeTableName).createSuccessCount.Inc()
 }
 
-// RecordRouteTableCreateError It records the times the creation of given Route Table failed.
+// RecordRouteTableCreateError records the times the creation of given Route Table failed.
 func RecordRouteTableCreateError(routeTableName string) {
-	getPerRouteTableCounters(routeTableName).createErrorCount.Inc()
+	getCountersByRouteTable(routeTableName).createErrorCount.Inc()
 }
