@@ -1,10 +1,11 @@
 package utils
 
 import (
-	v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/encoding/protojson"
 	"sigs.k8s.io/yaml"
+
+	v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 )
 
 /**
