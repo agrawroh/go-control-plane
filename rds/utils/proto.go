@@ -11,7 +11,7 @@ import (
 /**
  * getJsonBytes convert the yamlBytes to json and return bytes array.
  */
-func getJsonBytes(yamlBytes []byte) ([]byte, error) {
+func getJSONBytes(yamlBytes []byte) ([]byte, error) {
 	jsonBytes, err := yaml.YAMLToJSON(yamlBytes)
 	if err != nil {
 		return nil, errors.Wrap(err, "error occurred while converting JSON -> YAML")
@@ -22,7 +22,7 @@ func getJsonBytes(yamlBytes []byte) ([]byte, error) {
 // ConvertYamlToRouteConfigurationProto convert yamlBytes to v3 RouteConfiguration proto.
 func ConvertYamlToRouteConfigurationProto(yamlBytes []byte) (*v3.RouteConfiguration, error) {
 	config := &v3.RouteConfiguration{}
-	jsonBytes, err := getJsonBytes(yamlBytes)
+	jsonBytes, err := getJSONBytes(yamlBytes)
 	if err != nil {
 		return nil, errors.Wrap(err, "error occurred while creating v3.RouteConfiguration proto")
 	}
@@ -35,7 +35,7 @@ func ConvertYamlToRouteConfigurationProto(yamlBytes []byte) (*v3.RouteConfigurat
 // ConvertYamlToRouteProto convert yamlBytes to v3 Route proto.
 func ConvertYamlToRouteProto(yamlBytes []byte) (*v3.Route, error) {
 	config := &v3.Route{}
-	jsonBytes, err := getJsonBytes(yamlBytes)
+	jsonBytes, err := getJSONBytes(yamlBytes)
 	if err != nil {
 		return nil, errors.Wrap(err, "error occurred while creating v3.Route proto")
 	}
@@ -48,7 +48,7 @@ func ConvertYamlToRouteProto(yamlBytes []byte) (*v3.Route, error) {
 // ConvertYamlToVirtualClusterProto convert yamlBytes to v3 VirtualCluster proto.
 func ConvertYamlToVirtualClusterProto(yamlBytes []byte) (*v3.VirtualCluster, error) {
 	config := &v3.VirtualCluster{}
-	jsonBytes, err := getJsonBytes(yamlBytes)
+	jsonBytes, err := getJSONBytes(yamlBytes)
 	if err != nil {
 		return nil, errors.Wrap(err, "error occurred while creating v3.VirtualCluster proto")
 	}
