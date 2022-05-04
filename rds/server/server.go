@@ -89,32 +89,33 @@ func createTLSConfig(s *env.Settings) *tls.Config {
 	checkError(err)
 
 	if s.ServerTLS {
-		var certs []tls.Certificate
-		ca, err := getCertificatePool(s.ServerCaPath)
-		checkError(err)
-
-		if s.ServerCertificatePath != "" && s.ServerKeyPath != "" {
-			serverKeyPair, err := tls.LoadX509KeyPair(s.ServerCertificatePath, s.ServerKeyPath)
-			checkError(err)
-			certs = append(certs, serverKeyPair)
-		}
-
-		var clientAuth tls.ClientAuthType
-		if s.RequireClientCert {
-			clientAuth = tls.RequireAndVerifyClientCert
-		} else {
-			clientAuth = tls.NoClientCert
-		}
-
-		return &tls.Config{
-			MinVersion:   minTLS,
-			MaxVersion:   maxTLS,
-			Certificates: certs,
-			ClientAuth:   clientAuth,
-			ClientCAs:    ca,
-		}
+		return nil
 	}
-	return nil
+
+	var certs []tls.Certificate
+	ca, err := getCertificatePool(s.ServerCaPath)
+	checkError(err)
+
+	if s.ServerCertificatePath != "" && s.ServerKeyPath != "" {
+		serverKeyPair, err := tls.LoadX509KeyPair(s.ServerCertificatePath, s.ServerKeyPath)
+		checkError(err)
+		certs = append(certs, serverKeyPair)
+	}
+
+	var clientAuth tls.ClientAuthType
+	if s.RequireClientCert {
+		clientAuth = tls.RequireAndVerifyClientCert
+	} else {
+		clientAuth = tls.NoClientCert
+	}
+
+	return &tls.Config{
+		MinVersion:   minTLS,
+		MaxVersion:   maxTLS,
+		Certificates: certs,
+		ClientAuth:   clientAuth,
+		ClientCAs:    ca,
+	}
 }
 
 /**
@@ -127,29 +128,15 @@ func setupHealthCheck(grpcServer *grpc.Server, router *mux.Router) {
 }
 
 /**
- * startHTTPServer start a new HTTP server on HTTPPort to serve health check probes.
+ * startHTTPServer start a new HTTP server on HTTPPort with the given handler.
  */
-func startHTTPServer(HTTPPort int, router *mux.Router, logger utils.Logger) {
+func startHTTPServer(HTTPPort int, handler http.Handler, logger utils.Logger) {
 	addr := fmt.Sprintf(":%d", HTTPPort)
 	logger.Infof("Listening for HTTP on port: '%s'", addr)
 	list, err := net.Listen("tcp", addr)
 	checkError(err)
-	httpServer := &http.Server{Handler: router}
-	if err = httpServer.Serve(list); errors.Is(err, http.ErrServerClosed) {
-		panic(err)
-	}
-}
-
-/**
- * startDebugServer start a new HTTP debug server on HTTPPort to get pprof metrics.
- */
-func startDebugServer(HTTPPort int, logger utils.Logger) {
-	addr := fmt.Sprintf(":%d", HTTPPort)
-	logger.Infof("Listening for Debug on port: '%s'", addr)
-	list, err := net.Listen("tcp", addr)
-	checkError(err)
-	httpServer := &http.Server{Handler: http.DefaultServeMux}
-	if err = httpServer.Serve(list); errors.Is(err, http.ErrServerClosed) {
+	httpServer := &http.Server{Handler: handler}
+	if err = httpServer.Serve(list); err != nil {
 		panic(err)
 	}
 }
@@ -157,10 +144,11 @@ func startDebugServer(HTTPPort int, logger utils.Logger) {
 /**
  * checkStatsDServerStatus check whether StatsD container is up and running.
  */
-func checkStatsDServerStatus(statsDHost, statsDPort string) bool {
+func checkStatsDServerStatus(statsDHost, statsDPort string, logger utils.Logger) bool {
 	timeout := 60 * time.Second
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(statsDHost, statsDPort), timeout)
 	if err != nil {
+		logger.Errorf("error occurred while checking StatsD container liveliness", err.Error())
 		return false
 	}
 	err = conn.Close()
@@ -170,7 +158,7 @@ func checkStatsDServerStatus(statsDHost, statsDPort string) bool {
 // RunServer bootstrap the Route Discovery Service server.
 func RunServer(settings *env.Settings, server server.Server, logger utils.Logger) {
 	// Make sure that StatsD server is up and running
-	if checkStatsDServerStatus(settings.StatsDHost, settings.StatsDPort) {
+	if checkStatsDServerStatus(settings.StatsDHost, settings.StatsDPort, logger) {
 		panic("StatsD was not ready in 60 seconds.")
 	}
 
@@ -197,7 +185,7 @@ func RunServer(settings *env.Settings, server server.Server, logger utils.Logger
 	go startHTTPServer(settings.HTTPPort, healthCheckRouter, logger)
 	// We only add the debug server if its enabled
 	if settings.EnableDebugServer {
-		go startDebugServer(settings.DebugPort, logger)
+		go startHTTPServer(settings.DebugPort, http.DefaultServeMux, logger)
 	}
 
 	// Register RDS service
