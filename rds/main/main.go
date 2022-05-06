@@ -33,11 +33,25 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
 )
 
-var (
-	logger        utils.Logger
-	snapshotsVal  atomic.Value
+// SnapshotCache stores the snapshot for the route resources against a specific Envoy NodeID. Different nodes can
+// technically have different versions of snapshots but, in our case they are all same. It's possible for a new Envoy
+// replica to get added after the latest snapshot gets generated and hence we update SnapshotCache separately using
+// the value from the snapshotVal which points to the latest snapshot.
+type SnapshotCache struct {
+	mu            sync.Mutex
 	snapshotCache cache.SnapshotCache
-	settings      env.Settings
+}
+
+var (
+	logger utils.Logger
+	// snapshotVal stores the latest snapshot generated from the latest version of route tables which are created by
+	// aggregating all the routes and virtual clusters from different ConfigMap(s). Upon detecting a new version of the
+	// service import order ConfigMap, k8s watcher triggers the update function which then reads all other ConfigMap(s)
+	// to create new route tables, generate a new snapshot, and update this value.
+	snapshotVal atomic.Value
+	// settings contains the config flag values which are either the declared default or the values set by using the
+	// environment variables.
+	settings env.Settings
 )
 
 // Initialize Variables
@@ -50,87 +64,100 @@ func init() {
 	settings = env.NewSettings()
 	logger.Infof("settings: %s", settings)
 	// Initialize Snapshot
-	snapshotsVal = atomic.Value{}
-	// Initialize Snapshot Cache
-	snapshotCache = cache.NewSnapshotCache(false, cache.IDHash{}, logger)
+	snapshotVal = atomic.Value{}
 }
 
 /**
  * parseServiceImportOrderConfigMap parses the service import order ConfigMap and return an array of service names which
  * is used while aggregating the per-service routes and virtual clusters.
  */
-func parseServiceImportOrderConfigMap(configMap *coreV1.ConfigMap) ([]string, error) {
-	svcImportOrderConfigMapName := configMap.Name
-	logger.Debugf("service import order ConfigMap name: %s", svcImportOrderConfigMapName)
-	configMapDataMap, err := utils.Decompress(configMap)
+func parseServiceImportOrderConfigMap(compressedConfigMap *coreV1.ConfigMap) ([]string, error) {
+	configMapName := compressedConfigMap.Name
+	logger.Infof("service import order ConfigMap name: %s", configMapName)
+	configMap, err := utils.Decompress(compressedConfigMap)
 	if err != nil {
-		stats.RecordConfigMapParseError(svcImportOrderConfigMapName)
+		stats.RecordConfigMapParseError(configMapName)
 		return nil, errors.Wrap(err, "error occurred while parsing service import order ConfigMap")
 	}
-	stats.RecordConfigMapParseSuccess(svcImportOrderConfigMapName)
+	stats.RecordConfigMapParseSuccess(configMapName)
 	var serviceNames []string
-	for _, yamlBytes := range configMapDataMap {
+	for _, yamlBytes := range configMap {
 		if err := yaml.Unmarshal(yamlBytes, &serviceNames); err != nil {
-			stats.RecordConfigMapDataError(svcImportOrderConfigMapName)
+			stats.RecordConfigMapDataError(configMapName)
 			return nil, errors.Wrap(err, "error occurred while unmarshalling the service import order ConfigMap")
 		}
-		stats.RecordConfigMapProcessedSuccessError(svcImportOrderConfigMapName)
+		stats.RecordConfigMapProcessedSuccessError(configMapName)
 	}
 	return serviceNames, nil
 }
 
 /**
  * getRoutesImportOrder parse the route import order ConfigMap to get the routes & virtual clusters import order which
- * is used to aggregate the routes & virtual clusters in a specific order while creating the route tables.
+ * is used to aggregate the routes & virtual clusters in a specific order while creating the route tables. This and all
+ * other ConfigMap(s) are defined in the universe and they are published to the namespace where this service is running
+ * by a Spinnaker Pipeline for syncing route-discovery-service-config:
+ * `servicemesh-control/route-discovery-service/deploy/rds-envoy-configmaps.jsonnet.TEMPLATE`
+ *
+ * It returns a map of the route table name to its import order details:
+ * {
+ *   "extauthz-routes": { "routes": [<envoy-route>], "virtualClusters": [<envoy-virtual-cluster>] },
+ *   "https-routes": { "routes": [<envoy-route>], "virtualClusters": [<envoy-virtual-cluster>] },
+ *   ...
+ * }
  */
-func getRoutesImportOrder(clientSet *kubernetes.Clientset, k8sNamespace, configMapRequiredVersion string) (map[string]map[string][]string, error) {
-	routesImportOrderConfigMapName := settings.EnvoyRoutesImportOrderConfigName
-	routesImportOrderConfigMap, err := getVersionedConfigMap(clientSet, routesImportOrderConfigMapName, k8sNamespace, configMapRequiredVersion, true)
+func getRoutesImportOrder(clientSet *kubernetes.Clientset, k8sNamespace, requiredVersion string) (map[string]map[string][]string, error) {
+	configMapName := settings.EnvoyRoutesImportOrderConfigName
+	compressedConfigMap, err := getConfigMap(clientSet, configMapName, k8sNamespace, requiredVersion, true)
 	if err != nil {
-		stats.RecordConfigMapFetchError(routesImportOrderConfigMapName)
+		stats.RecordConfigMapFetchError(configMapName)
 		return nil, errors.Wrap(err, "error occurred while fetching routes import order ConfigMap")
 	}
-	configMapDataMap, err := utils.Decompress(routesImportOrderConfigMap)
+	configMap, err := utils.Decompress(compressedConfigMap)
 	if err != nil {
-		stats.RecordConfigMapParseError(routesImportOrderConfigMapName)
+		stats.RecordConfigMapParseError(configMapName)
 		return nil, errors.Wrap(err, "error occurred while parsing routes import order ConfigMap")
 	}
-	stats.RecordConfigMapParseSuccess(routesImportOrderConfigMapName)
+	stats.RecordConfigMapParseSuccess(configMapName)
 	routesImportOrderMap := make(map[string]map[string][]string)
-	for _, yamlBytes := range configMapDataMap {
+	for _, yamlBytes := range configMap {
 		if err := yaml.Unmarshal(yamlBytes, &routesImportOrderMap); err != nil {
-			stats.RecordConfigMapDataError(routesImportOrderConfigMapName)
+			stats.RecordConfigMapDataError(configMapName)
 			return nil, errors.Wrap(err, "error occurred while unmarshalling routes import order ConfigMap")
 		}
-		stats.RecordConfigMapProcessedSuccessError(routesImportOrderConfigMapName)
+		stats.RecordConfigMapProcessedSuccessError(configMapName)
 	}
 	return routesImportOrderMap, nil
 }
 
 /**
- * getVersionedConfigMap get the ConfigMap and compare the version hash on it with the master version retrieved from the
- * service import order ConfigMap. If there is a hash/version mismatch then we wait for some time hoping that there is
- * an ongoing sync, and we would get the expected version once the sync finishes. If we don't get the correct/required
- * version hash even after waiting then we give up and return an error.
+ * getConfigMap get the ConfigMap and compare the version hash on it with the master version retrieved from the
+ * service import order ConfigMap.
+ * The idea is to have all the ConfigMap(s) with the same hash that gets added by the sjsonnet binary. We read the
+ * version hash from the first ConfigMap i.e. the service import order ConfigMap and then compare that version hash with
+ * all other ConfigMap(s) we read to create the route tables. If there is a hash/version mismatch then we wait for some
+ * time hoping that there is an ongoing sync, and we would get the expected version once the sync finishes. If we don't
+ * get the correct/required version hash even after waiting then we give up and return an error.
  */
-func getVersionedConfigMap(clientSet *kubernetes.Clientset, configMapName, k8sNamespace, configMapRequiredVersion string, shouldWaitForSync bool) (*coreV1.ConfigMap, error) {
+func getConfigMap(clientSet *kubernetes.Clientset, configMapName, k8sNamespace, requiredVersion string, shouldWaitForSync bool) (*coreV1.ConfigMap, error) {
 	configMap, err := clientSet.CoreV1().ConfigMaps(k8sNamespace).Get(context.TODO(), configMapName, metaV1.GetOptions{})
 	if err != nil {
 		stats.RecordConfigMapFetchError(configMapName)
 		return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetching ConfigMap: %s", configMapName))
 	}
+	// This version hash is computed by the Scala JSONNET (sjsonnet) binary and is added to all the RDS ConfigMap(s)
+	// i.e. Routes and Service Configurations, Import Orders, etc.
 	configMapVersion, versionLabelFound := configMap.Labels["versionHash"]
 	if !versionLabelFound {
 		return nil, fmt.Errorf("failed to get version label from the ConfigMap: %s", configMapName)
 	}
-	// If the version hash retrieved from the ConfigMap is not same as the one we got from the main import order then,
-	// we'll wait for some time and see if an update is pending.
-	if configMapVersion != configMapRequiredVersion {
+	// If the version hash retrieved from the ConfigMap is not same as the one we got from the service import order map
+	// then, we'll wait for some time and see if an update is pending.
+	if configMapVersion != requiredVersion {
 		if shouldWaitForSync {
 			time.Sleep(time.Duration(settings.SyncDelayTimeSeconds) * time.Second)
-			return getVersionedConfigMap(clientSet, configMapName, k8sNamespace, configMapRequiredVersion, false)
+			return getConfigMap(clientSet, configMapName, k8sNamespace, requiredVersion, false)
 		}
-		return nil, fmt.Errorf("version hash mismatch on the ConfigMap: %s. Required: %s, Received: %s", configMapName, configMapRequiredVersion, configMapVersion)
+		return nil, fmt.Errorf("version hash mismatch on the ConfigMap: %s. Required: %s, Received: %s", configMapName, requiredVersion, configMapVersion)
 	}
 	return configMap, nil
 }
@@ -142,34 +169,37 @@ func getVersionedConfigMap(clientSet *kubernetes.Clientset, configMapName, k8sNa
  * 3. It aggregates all the per-service routes and virtual clusters following the import order and append the data back
  *    to the route table to create a final route table with all the routes & virtual clusters.
  */
-func getRouteConfigurations(clientSet *kubernetes.Clientset, k8sNamespace, configMapRequiredVersion string, serviceNames []string) ([]*v3.RouteConfiguration, error) {
-	routeConfigurationConfigMapName := settings.EnvoyRouteConfigurationsConfigName
-	routeConfigurationsConfigMap, err := getVersionedConfigMap(clientSet, routeConfigurationConfigMapName, k8sNamespace, configMapRequiredVersion, true)
-	var routeTables []*v3.RouteConfiguration
+func getRouteConfigurations(clientSet *kubernetes.Clientset, k8sNamespace, requiredVersion string, serviceNames []string) ([]*v3.RouteConfiguration, error) {
+	configMapName := settings.EnvoyRouteConfigurationsConfigName
+	compressedConfigMap, err := getConfigMap(clientSet, configMapName, k8sNamespace, requiredVersion, true)
 	if err != nil {
-		stats.RecordConfigMapFetchError(routeConfigurationConfigMapName)
+		stats.RecordConfigMapFetchError(configMapName)
 		return nil, errors.Wrap(err, "error occurred while fetching routes configuration ConfigMap")
 	}
-	stats.RecordConfigMapParseSuccess(routeConfigurationConfigMapName)
-	routesImportOrderMap, err := getRoutesImportOrder(clientSet, k8sNamespace, configMapRequiredVersion)
+	stats.RecordConfigMapParseSuccess(configMapName)
+	configMap, err := utils.Decompress(compressedConfigMap)
+	if err != nil {
+		stats.RecordConfigMapDataError(configMapName)
+		return nil, errors.Wrap(err, "error occurred while parsing routes configuration ConfigMap")
+	}
+
+	// Get routes import order
+	routesImportOrderMap, err := getRoutesImportOrder(clientSet, k8sNamespace, requiredVersion)
 	if err != nil {
 		return nil, errors.Wrap(err, "error occurred while getting routes import order")
 	}
-	configMapDataMap, err := utils.Decompress(routeConfigurationsConfigMap)
-	if err != nil {
-		stats.RecordConfigMapDataError(routeConfigurationConfigMapName)
-		return nil, errors.Wrap(err, "error occurred while parsing routes configuration ConfigMap")
-	}
+
 	// Read all the route table configs
-	for name, yamlBytes := range configMapDataMap {
-		logger.Infof("start creating route table '%s' with version hash '%s'", name, configMapRequiredVersion)
+	var routeTables []*v3.RouteConfiguration
+	for name, yamlBytes := range configMap {
+		logger.Infof("start creating route table '%s' with version hash '%s'", name, requiredVersion)
 		routeTablePb, err := utils.ConvertYamlToRouteConfigurationProto(yamlBytes)
 		if err != nil {
-			stats.RecordConfigMapDataError(routeConfigurationConfigMapName)
+			stats.RecordConfigMapDataError(configMapName)
 			return nil, errors.Wrap(err, "error occurred while creating v3.RouteConfiguration proto from the ConfigMap data")
 		}
 		// Append Routes
-		aggregatedRoutes, err := aggregateRoutes(clientSet, k8sNamespace, configMapRequiredVersion, serviceNames, routesImportOrderMap[name]["routes"])
+		aggregatedRoutes, err := aggregateRoutes(clientSet, k8sNamespace, requiredVersion, serviceNames, routesImportOrderMap[name]["routes"])
 		if err != nil {
 			stats.RecordRouteTableCreateError(name)
 			return nil, errors.Wrap(err, fmt.Sprintf("error occurred while aggregating the routes for route table: %s", name))
@@ -177,9 +207,8 @@ func getRouteConfigurations(clientSet *kubernetes.Clientset, k8sNamespace, confi
 		stats.RecordRouteTableAggregatedRoutes(name, uint64(len(aggregatedRoutes)))
 		routeTablePb.VirtualHosts[0].Routes = append(routeTablePb.VirtualHosts[0].Routes, aggregatedRoutes...)
 		stats.RecordRouteTableTotalRoutes(name, uint64(len(routeTablePb.VirtualHosts[0].Routes)))
-		aggregatedRoutes = nil
 		// Append Virtual Clusters
-		aggregatedVirtualClusters, err := aggregateVirtualClusters(clientSet, k8sNamespace, configMapRequiredVersion, serviceNames, routesImportOrderMap[name]["virtualClusters"])
+		aggregatedVirtualClusters, err := aggregateVirtualClusters(clientSet, k8sNamespace, requiredVersion, serviceNames, routesImportOrderMap[name]["virtualClusters"])
 		if err != nil {
 			stats.RecordRouteTableCreateError(name)
 			return nil, errors.Wrap(err, fmt.Sprintf("error occurred while aggregating the virtual clusters for route table: %s", name))
@@ -187,38 +216,34 @@ func getRouteConfigurations(clientSet *kubernetes.Clientset, k8sNamespace, confi
 		stats.RecordRouteTableAggregatedVirtualClusters(name, uint64(len(aggregatedVirtualClusters)))
 		routeTablePb.VirtualHosts[0].VirtualClusters = append(routeTablePb.VirtualHosts[0].VirtualClusters, aggregatedVirtualClusters...)
 		stats.RecordRouteTableTotalVirtualClusters(name, uint64(len(routeTablePb.VirtualHosts[0].VirtualClusters)))
-		aggregatedVirtualClusters = nil
 		logger.Infof("finished creating the route table: %s", name)
 		stats.RecordRouteTableCreateSuccess(name)
 		routeTables = append(routeTables, routeTablePb)
-		routeTablePb = nil
 	}
-	stats.RecordConfigMapProcessedSuccessError(routeConfigurationConfigMapName)
+	stats.RecordConfigMapProcessedSuccessError(configMapName)
 	return routeTables, nil
 }
 
 /**
  * aggregateRoutes aggregate all the routes following the routes import order.
  */
-func aggregateRoutes(clientSet *kubernetes.Clientset, k8sNamespace, configMapRequiredVersion string, serviceNames, routesImportOrder []string) (aggregatedRoutes []*v3.Route, err error) {
+func aggregateRoutes(clientSet *kubernetes.Clientset, k8sNamespace, requiredVersion string, serviceNames, routesImportOrder []string) (aggregatedRoutes []*v3.Route, err error) {
 	for _, importConfigName := range routesImportOrder {
 		serviceRoutesSuffix := "-svc-routes"
 		serviceVirtualClusterSuffix := "-vc-svc-routes"
 		if strings.Contains(importConfigName, serviceRoutesSuffix) && !strings.Contains(importConfigName, serviceVirtualClusterSuffix) {
 			prefix := strings.Split(importConfigName, serviceRoutesSuffix)[0]
-			svcRoutes, err := parseServiceRoutesConfigMap(clientSet, k8sNamespace, configMapRequiredVersion, prefix, serviceNames)
+			svcRoutes, err := parseServiceRoutesConfigMap(clientSet, k8sNamespace, requiredVersion, prefix, serviceNames)
 			if err != nil {
 				return nil, errors.Wrap(err, "error occurred while parsing per-service route ConfigMap(s)")
 			}
 			aggregatedRoutes = append(aggregatedRoutes, svcRoutes...)
-			svcRoutes = nil
 		} else {
-			routes, err := getRoutes(clientSet, k8sNamespace, importConfigName, configMapRequiredVersion)
+			routes, err := getRoutes(clientSet, k8sNamespace, importConfigName, requiredVersion)
 			if err != nil {
 				return nil, errors.Wrap(err, "error occurred while parsing the route ConfigMap")
 			}
 			aggregatedRoutes = append(aggregatedRoutes, routes...)
-			routes = nil
 		}
 	}
 	return aggregatedRoutes, nil
@@ -227,25 +252,23 @@ func aggregateRoutes(clientSet *kubernetes.Clientset, k8sNamespace, configMapReq
 /**
  * aggregateVirtualClusters aggregate all the virtual clusters following the vc import order.
  */
-func aggregateVirtualClusters(clientSet *kubernetes.Clientset, k8sNamespace, configMapRequiredVersion string, serviceNames, vcImportOrder []string) (aggregatedVirtualClusters []*v3.VirtualCluster, err error) {
+func aggregateVirtualClusters(clientSet *kubernetes.Clientset, k8sNamespace, requiredVersion string, serviceNames, vcImportOrder []string) (aggregatedVirtualClusters []*v3.VirtualCluster, err error) {
 	for _, importConfigName := range vcImportOrder {
 		serviceRoutesSuffix := "-svc-routes"
 		serviceVirtualClusterSuffix := "-vc-svc-routes"
 		if strings.Contains(importConfigName, serviceVirtualClusterSuffix) {
 			prefix := strings.Split(importConfigName, serviceRoutesSuffix)[0]
-			svcVirtualClusters, err := parseServiceVirtualClustersConfigMap(clientSet, k8sNamespace, configMapRequiredVersion, prefix, serviceNames)
+			svcVirtualClusters, err := parseServiceVirtualClustersConfigMap(clientSet, k8sNamespace, requiredVersion, prefix, serviceNames)
 			if err != nil {
 				return nil, errors.Wrap(err, "error occurred while parsing per-service virtual clusters ConfigMap(s)")
 			}
 			aggregatedVirtualClusters = append(aggregatedVirtualClusters, svcVirtualClusters...)
-			svcVirtualClusters = nil
 		} else {
-			virtualClusters, err := getVirtualClusters(clientSet, k8sNamespace, importConfigName, configMapRequiredVersion)
+			virtualClusters, err := getVirtualClusters(clientSet, k8sNamespace, importConfigName, requiredVersion)
 			if err != nil {
 				return nil, errors.Wrap(err, "error occurred while parsing the virtual cluster ConfigMap")
 			}
 			aggregatedVirtualClusters = append(aggregatedVirtualClusters, virtualClusters...)
-			virtualClusters = nil
 		}
 	}
 	return aggregatedVirtualClusters, nil
@@ -254,11 +277,11 @@ func aggregateVirtualClusters(clientSet *kubernetes.Clientset, k8sNamespace, con
 /**
  * parseServiceRoutesConfigMap read the per-service routes k8s ConfigMap(s) and returns an aggregated array of v3.Route.
  */
-func parseServiceRoutesConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, configMapRequiredVersion, configMapNamePrefix string, serviceNames []string) (allSvcRoutes []*v3.Route, err error) {
+func parseServiceRoutesConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, requiredVersion, configMapNamePrefix string, serviceNames []string) (allSvcRoutes []*v3.Route, err error) {
 	// Service Routes
 	for _, serviceName := range serviceNames {
 		configMapName := fmt.Sprintf("%s-%s", configMapNamePrefix, serviceName)
-		serviceRoutes, err := getRoutes(clientSet, k8sNamespace, configMapName, configMapRequiredVersion)
+		serviceRoutes, err := getRoutes(clientSet, k8sNamespace, configMapName, requiredVersion)
 		if err != nil {
 			return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetchig the route ConfigMap: '%s'", configMapName))
 		} else if len(serviceRoutes) > 0 {
@@ -266,7 +289,6 @@ func parseServiceRoutesConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, 
 		} else {
 			logger.Debugf(fmt.Sprintf("no routes defined in: '%s'", configMapName))
 		}
-		serviceRoutes = nil
 	}
 	logger.Infof("total number of service routes found: %d", len(allSvcRoutes))
 	return allSvcRoutes, nil
@@ -276,11 +298,11 @@ func parseServiceRoutesConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, 
  * parseServiceVirtualClustersConfigMap read the per-service virtual clusters k8s ConfigMap(s) and returns an aggregated
  * array of v3.VirtualCluster.
  */
-func parseServiceVirtualClustersConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, configMapRequiredVersion, configMapNamePrefix string, serviceNames []string) (allSvcVirtualClusters []*v3.VirtualCluster, err error) {
+func parseServiceVirtualClustersConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, requiredVersion, configMapNamePrefix string, serviceNames []string) (allSvcVirtualClusters []*v3.VirtualCluster, err error) {
 	// Service Virtual Clusters
 	for _, serviceName := range serviceNames {
 		configMapName := fmt.Sprintf("%s-%s", configMapNamePrefix, serviceName)
-		serviceVirtualClusters, err := getVirtualClusters(clientSet, k8sNamespace, configMapName, configMapRequiredVersion)
+		serviceVirtualClusters, err := getVirtualClusters(clientSet, k8sNamespace, configMapName, requiredVersion)
 		if err != nil {
 			return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetchig the virtual cluster ConfigMap: '%s'", configMapName))
 		} else if len(serviceVirtualClusters) > 0 {
@@ -288,7 +310,6 @@ func parseServiceVirtualClustersConfigMap(clientSet *kubernetes.Clientset, k8sNa
 		} else {
 			logger.Debugf(fmt.Sprintf("no virtual clusters defined in: '%s'", configMapName))
 		}
-		serviceVirtualClusters = nil
 	}
 	logger.Infof("total number of virtual clusters found: %d", len(allSvcVirtualClusters))
 	return allSvcVirtualClusters, nil
@@ -297,39 +318,39 @@ func parseServiceVirtualClustersConfigMap(clientSet *kubernetes.Clientset, k8sNa
 /**
  * getRoutes read the routes k8s ConfigMap and returns an array of v3.Route.
  */
-func getRoutes(clientSet *kubernetes.Clientset, k8sNamespace, routesConfigMapName, configMapRequiredVersion string) ([]*v3.Route, error) {
-	routesConfigMap, err := getVersionedConfigMap(clientSet, routesConfigMapName, k8sNamespace, configMapRequiredVersion, true)
+func getRoutes(clientSet *kubernetes.Clientset, k8sNamespace, configMapName, requiredVersion string) ([]*v3.Route, error) {
+	compressedConfigMap, err := getConfigMap(clientSet, configMapName, k8sNamespace, requiredVersion, true)
 	if err != nil {
-		stats.RecordConfigMapFetchError(routesConfigMapName)
+		stats.RecordConfigMapFetchError(configMapName)
 		return nil, errors.Wrap(err, "error occurred while fetching the routes ConfigMap")
 	}
-	configMapDataMap, err := utils.Decompress(routesConfigMap)
+	configMap, err := utils.Decompress(compressedConfigMap)
 	if err != nil {
-		stats.RecordConfigMapParseError(routesConfigMapName)
+		stats.RecordConfigMapParseError(configMapName)
 		return nil, errors.Wrap(err, "error occurred while parsing the routes ConfigMap")
 	}
-	stats.RecordConfigMapParseSuccess(routesConfigMapName)
-	for _, yamlBytes := range configMapDataMap {
+	stats.RecordConfigMapParseSuccess(configMapName)
+	for _, yamlBytes := range configMap {
 		var routesMap []map[string]interface{}
 		if err := yaml.Unmarshal(yamlBytes, &routesMap); err != nil {
-			stats.RecordConfigMapDataError(routesConfigMapName)
+			stats.RecordConfigMapDataError(configMapName)
 			return nil, errors.Wrap(err, "error occurred while unmarshalling the routes array")
 		}
-		var routesArray []*v3.Route
+		var routes []*v3.Route
 		for _, route := range routesMap {
 			routeBytes, err := json.Marshal(route)
 			if err != nil {
-				stats.RecordConfigMapDataError(routesConfigMapName)
+				stats.RecordConfigMapDataError(configMapName)
 				return nil, errors.Wrap(err, "error occurred while marshaling the route data")
 			}
 			routePb, _ := utils.ConvertYamlToRouteProto(routeBytes)
 			if routePb != nil && routePb.ValidateAll() == nil {
-				routesArray = append(routesArray, routePb)
+				routes = append(routes, routePb)
 			}
 		}
-		stats.RecordConfigMapProcessedSuccessError(routesConfigMapName)
-		stats.RecordConfigMapItems(routesConfigMapName, uint64(len(routesArray)))
-		return routesArray, nil
+		stats.RecordConfigMapProcessedSuccessError(configMapName)
+		stats.RecordConfigMapItems(configMapName, uint64(len(routes)))
+		return routes, nil
 	}
 	return nil, err
 }
@@ -337,39 +358,39 @@ func getRoutes(clientSet *kubernetes.Clientset, k8sNamespace, routesConfigMapNam
 /**
  * getVirtualClusters read the virtual clusters k8s ConfigMap and returns an array of v3.VirtualCluster.
  */
-func getVirtualClusters(clientSet *kubernetes.Clientset, k8sNamespace, vcConfigMapName, configMapRequiredVersion string) ([]*v3.VirtualCluster, error) {
-	vcConfigMap, err := getVersionedConfigMap(clientSet, vcConfigMapName, k8sNamespace, configMapRequiredVersion, true)
+func getVirtualClusters(clientSet *kubernetes.Clientset, k8sNamespace, configMapName, requiredVersion string) ([]*v3.VirtualCluster, error) {
+	compressedConfigMap, err := getConfigMap(clientSet, configMapName, k8sNamespace, requiredVersion, true)
 	if err != nil {
-		stats.RecordConfigMapFetchError(vcConfigMapName)
+		stats.RecordConfigMapFetchError(configMapName)
 		return nil, errors.Wrap(err, "error occurred while fetching the virtual clusters ConfigMap")
 	}
-	configMapDataMap, err := utils.Decompress(vcConfigMap)
+	configMap, err := utils.Decompress(compressedConfigMap)
 	if err != nil {
-		stats.RecordConfigMapParseError(vcConfigMapName)
+		stats.RecordConfigMapParseError(configMapName)
 		return nil, errors.Wrap(err, "error occurred while parsing the virtual clusters ConfigMap")
 	}
-	stats.RecordConfigMapParseSuccess(vcConfigMapName)
-	for _, yamlBytes := range configMapDataMap {
+	stats.RecordConfigMapParseSuccess(configMapName)
+	for _, yamlBytes := range configMap {
 		var vcMap []map[string]interface{}
 		if err := yaml.Unmarshal(yamlBytes, &vcMap); err != nil {
-			stats.RecordConfigMapDataError(vcConfigMapName)
+			stats.RecordConfigMapDataError(configMapName)
 			return nil, errors.Wrap(err, "error occurred while unmarshalling the virtual clusters array")
 		}
-		var virtualClustersArray []*v3.VirtualCluster
+		var virtualClusters []*v3.VirtualCluster
 		for _, vc := range vcMap {
 			vcBytes, err := json.Marshal(vc)
 			if err != nil {
-				stats.RecordConfigMapDataError(vcConfigMapName)
+				stats.RecordConfigMapDataError(configMapName)
 				return nil, errors.Wrap(err, "error occurred while marshaling the virtual cluster data")
 			}
 			virtualClusterPb, _ := utils.ConvertYamlToVirtualClusterProto(vcBytes)
 			if virtualClusterPb != nil && virtualClusterPb.ValidateAll() == nil {
-				virtualClustersArray = append(virtualClustersArray, virtualClusterPb)
+				virtualClusters = append(virtualClusters, virtualClusterPb)
 			}
 		}
-		stats.RecordConfigMapProcessedSuccessError(vcConfigMapName)
-		stats.RecordConfigMapItems(vcConfigMapName, uint64(len(virtualClustersArray)))
-		return virtualClustersArray, nil
+		stats.RecordConfigMapProcessedSuccessError(configMapName)
+		stats.RecordConfigMapItems(configMapName, uint64(len(virtualClusters)))
+		return virtualClusters, nil
 	}
 	return nil, err
 }
@@ -409,7 +430,7 @@ func doUpdate(clientSet *kubernetes.Clientset, namespace string, svcImportOrderC
 	if err != nil {
 		return errors.Wrap(err, "error occurred while updating the cache snapshot")
 	}
-	snapshotsVal.Store(*newSnapshot)
+	snapshotVal.Store(*newSnapshot)
 	logger.Infof("successfully updated snapshot with version: %s", versionID)
 	return nil
 }
@@ -484,16 +505,18 @@ func initKubernetesClient() *kubernetes.Clientset {
  * pulling and aggregating the data from different ConfigMap(s) on changes.
  */
 func setupWatcher(clientSet *kubernetes.Clientset) {
-	var (
-		mutex *sync.Mutex
-	)
-	mutex = &sync.Mutex{}
+	mutex := &sync.Mutex{}
 	go watchForChanges(clientSet, mutex)
 }
 
 /**
  * watchForChanges watcher implementation which would look at any state changes on the Envoy service import order
  * ConfigMap i.e. `envoy-svc-import-order-config` and invokes `updateCurrentConfigmap()` for every change.
+ *
+ * Service import order ConfigMap is the first ConfigMap that we read. Update function reads all other ConfigMap(s) i.e.
+ * route configurations, route import orders, etc. to aggregate all the routes & virtual clusters and to create the
+ * route tables. All the ConfigMap(s) are expected to have the same version hash which is added by the sjsonnet
+ * binary and hence we ignore the update if any of the ConfigMap doesn't have the same version hash.
  */
 func watchForChanges(clientSet *kubernetes.Clientset, mutex *sync.Mutex) {
 	for {
@@ -511,35 +534,31 @@ func watchForChanges(clientSet *kubernetes.Clientset, mutex *sync.Mutex) {
 /**
  * setupSnapshotUpdater set up a new snapshot updater which would set the latest snapshot to all the client nodes.
  */
-func setupSnapshotUpdater() {
-	var (
-		mutex *sync.Mutex
-	)
-	mutex = &sync.Mutex{}
-	go updateSnapshotCache(mutex)
+func setupSnapshotUpdater(sc *SnapshotCache) {
+	go sc.updateSnapshotCache()
 }
 
 /**
  * updateSnapshotCache update the snapshot cache for the client nodes with the most recent snapshot.
  */
-func updateSnapshotCache(mutex *sync.Mutex) {
+func (sc *SnapshotCache) updateSnapshotCache() {
 	for {
-		latestSnapshotEntry := snapshotsVal.Load()
+		latestSnapshotEntry := snapshotVal.Load()
 		if latestSnapshotEntry != nil {
 			latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
 			latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
-			mutex.Lock()
-			nodesIdsSet := snapshotCache.GetStatusKeys()
+			sc.mu.Lock()
+			nodesIdsSet := sc.snapshotCache.GetStatusKeys()
 			for _, nodeID := range nodesIdsSet {
-				snapshot, err := snapshotCache.GetSnapshot(nodeID)
+				snapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
 				if err != nil {
 					logger.Debugf("unable to get the existing snapshot for nodeID: %s", nodeID, err.Error())
-					setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
+					sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
 				} else if snapshot.GetVersion(resourcesV3.RouteType) != latestSnapshotVersion {
-					setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
+					sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
 				}
 			}
-			mutex.Unlock()
+			sc.mu.Unlock()
 		}
 		// Add some delay
 		time.Sleep(1 * time.Second)
@@ -549,13 +568,13 @@ func updateSnapshotCache(mutex *sync.Mutex) {
 /**
  * setSnapshot set the snapshot for the given nodeID in the snapshots cache.
  */
-func setSnapshot(nodeID, latestSnapshotVersion string, latestSnapshot *cache.Snapshot) {
+func (sc *SnapshotCache) setSnapshot(nodeID, version string, snapshot *cache.Snapshot) {
 	logger.Infof("start setting snapshot for nodeID: %s", nodeID)
-	if err := snapshotCache.SetSnapshot(context.Background(), nodeID, latestSnapshot); err != nil {
+	if err := sc.snapshotCache.SetSnapshot(context.Background(), nodeID, snapshot); err != nil {
 		logger.Errorf("error occurred while updating the snapshot cache", err.Error())
-		stats.RecordSnapshotCacheUpdateError(nodeID, latestSnapshotVersion)
+		stats.RecordSnapshotCacheUpdateError(nodeID, version)
 	} else {
-		stats.RecordSnapshotCacheUpdateSuccess(nodeID, latestSnapshotVersion)
+		stats.RecordSnapshotCacheUpdateSuccess(nodeID, version)
 		logger.Infof("successfully updated the snapshot cache for nodeID: %s", nodeID)
 	}
 }
@@ -574,11 +593,14 @@ func main() {
 	setupWatcher(clientSet)
 
 	// Setup Cache Snapshot Updater
-	setupSnapshotUpdater()
+	sc := SnapshotCache{
+		snapshotCache: cache.NewSnapshotCache(false, cache.IDHash{}, logger),
+	}
+	setupSnapshotUpdater(&sc)
 
 	// Run the RDS server
 	logger.Infof("running RDS server...")
 	ctx := context.Background()
-	gRPCServer := server.NewServer(ctx, snapshotCache, nil)
+	gRPCServer := server.NewServer(ctx, sc.snapshotCache, nil)
 	rdsServer.RunServer(&settings, gRPCServer, logger)
 }
