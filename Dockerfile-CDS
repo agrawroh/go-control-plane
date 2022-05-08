@@ -1,0 +1,23 @@
+# The default obtained 6/4 from /universe/docker-images/ubuntu/18.04/BUILD
+ARG IMAGE_SHA=sha256:6058c5e6bd1c60a065f5197d705386c84c62c4ab806ef51a7342a3237fcd1e5d
+# Set base image to internal ubuntu image with image sha version generated in build_container.sh
+FROM registry.dev.databricks.com/universe/db-ubuntu-18.04@${IMAGE_SHA} AS final
+
+# Install Necessary Tools
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get autoremove -y \
+    && apt-get clean \
+    && apt-get install -y rsyslog cron logrotate curl vim jq less \
+    && rm -rf /tmp/* /var/tmp/* \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy CDS Binary --> `/databricks/cds`
+COPY bin/cds /databricks/cds
+RUN chmod +x /databricks/cds
+
+# Port
+EXPOSE 11001
+
+# Run CDS Binary
+CMD ["/bin/bash", "-c", "/databricks/cds"]
