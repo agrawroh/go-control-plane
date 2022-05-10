@@ -38,7 +38,6 @@ import (
 // replica to get added after the latest snapshot gets generated and hence we update SnapshotCache separately using
 // the value from the snapshotVal which points to the latest snapshot.
 type SnapshotCache struct {
-	mu            sync.Mutex
 	snapshotCache cache.SnapshotCache
 }
 
@@ -90,7 +89,7 @@ func ParseServiceImportOrderConfigMap(compressedConfigMap *coreV1.ConfigMap) ([]
 }
 
 /**
- * getRoutesImportOrder parse the route import order ConfigMap to get the routes & virtual clusters import order which
+ * getRoutesImportOrder parses the route import order ConfigMap to get the routes & virtual clusters import order which
  * is used to aggregate the routes & virtual clusters in a specific order while creating the route tables. This and all
  * other ConfigMap(s) are defined in the universe and they are published to the namespace where this service is running
  * by a Spinnaker Pipeline for syncing route-discovery-service-config:
@@ -128,8 +127,9 @@ func getRoutesImportOrder(clientSet *kubernetes.Clientset, k8sNamespace, require
 }
 
 /**
- * getConfigMap get the ConfigMap and compare the version hash on it with the master version retrieved from the
+ * getConfigMap gets the ConfigMap and compare the version hash on it with the master version retrieved from the
  * service import order ConfigMap.
+ *
  * The idea is to have all the ConfigMap(s) with the same hash that gets added by the sjsonnet binary. We read the
  * version hash from the first ConfigMap i.e. the service import order ConfigMap and then compare that version hash with
  * all other ConfigMap(s) we read to create the route tables. If there is a hash/version mismatch then we wait for some
@@ -312,7 +312,7 @@ func parseVirtualClustersConfigMap(clientSet *kubernetes.Clientset, k8sNamespace
 }
 
 /**
- * getRoutes read the routes k8s ConfigMap and returns an array of v3.Route.
+ * getRoutes read the routes k8s ConfigMap(s) and returns a slice of v3.Route.
  */
 func getRoutes(clientSet *kubernetes.Clientset, k8sNamespace, configMapName, requiredVersion string) ([]*v3.Route, error) {
 	compressedConfigMap, err := getConfigMap(clientSet, configMapName, k8sNamespace, requiredVersion, true)
@@ -352,7 +352,7 @@ func getRoutes(clientSet *kubernetes.Clientset, k8sNamespace, configMapName, req
 }
 
 /**
- * getVirtualClusters read the virtual clusters k8s ConfigMap and returns an array of v3.VirtualCluster.
+ * getVirtualClusters read the virtual clusters k8s ConfigMap(s) and returns a slice of v3.VirtualCluster.
  */
 func getVirtualClusters(clientSet *kubernetes.Clientset, k8sNamespace, configMapName, requiredVersion string) ([]*v3.VirtualCluster, error) {
 	compressedConfigMap, err := getConfigMap(clientSet, configMapName, k8sNamespace, requiredVersion, true)
@@ -392,8 +392,8 @@ func getVirtualClusters(clientSet *kubernetes.Clientset, k8sNamespace, configMap
 }
 
 /**
- * doUpdate start the update process by parsing different ConfigMap(s), aggregating all the resources and update the
- * snapshot cache.
+ * doUpdate starts the update process by parsing different ConfigMap(s), aggregating all the ConfigMap(s) and update the
+ * Snapshot.
  */
 func doUpdate(clientSet *kubernetes.Clientset, namespace string, svcImportOrderConfigMap *coreV1.ConfigMap) error {
 	configMapVersion, versionLabelFound := svcImportOrderConfigMap.Labels["versionHash"]
@@ -432,7 +432,7 @@ func doUpdate(clientSet *kubernetes.Clientset, namespace string, svcImportOrderC
 }
 
 /**
- * updateSnapshot read all ConfigMap(s) to create final route tables and update the cache snapshot when a new version of
+ * updateSnapshot read all the ConfigMap(s) to create final route tables and update the Snapshot when a new version of
  * the service order ConfigMap gets detected.
  */
 func updateSnapshot(clientSet *kubernetes.Clientset, watchEventChannel <-chan watch.Event, mutex *sync.Mutex) {
@@ -465,7 +465,7 @@ func updateSnapshot(clientSet *kubernetes.Clientset, watchEventChannel <-chan wa
 }
 
 /**
- * initKubernetesClient initialize the kubernetes client which would be used to fetch the ConfigMap resources.
+ * initKubernetesClient initializes the kubernetes client which is used to fetch the ConfigMap(s).
  */
 func initKubernetesClient() *kubernetes.Clientset {
 	logger.Debugf("start initializing the kubernetes client...")
@@ -497,7 +497,7 @@ func initKubernetesClient() *kubernetes.Clientset {
 }
 
 /**
- * setupWatcher set up a new watcher which would look at the ConfigMap state changes and update the snapshot cache by
+ * setupWatcher sets up a new watcher which would look at the ConfigMap state changes and update the snapshot cache by
  * pulling and aggregating the data from different ConfigMap(s) on changes.
  */
 func setupWatcher(clientSet *kubernetes.Clientset) {
@@ -506,12 +506,12 @@ func setupWatcher(clientSet *kubernetes.Clientset) {
 }
 
 /**
- * watchForChanges watcher implementation which would look at any state changes on the Envoy service import order
- * ConfigMap i.e. `envoy-svc-import-order-config` and invokes `updateCurrentConfigmap()` for every change.
+ * watchForChanges looks at changes on the Envoy ConfigMap envoy-svc-import-order-config and invokes
+ * updateCurrentConfigmap() for every change.
  *
- * Service import order ConfigMap is the first ConfigMap that we read. Update function reads all other ConfigMap(s) i.e.
- * route configurations, route import orders, etc. to aggregate all the routes & virtual clusters and to create the
- * route tables. All the ConfigMap(s) are expected to have the same version hash which is added by the sjsonnet
+ * Service import order ConfigMap is the first ConfigMap that we read. Update function reads all other ConfigMap(s)
+ * i.e., route configurations, route import orders, etc., to aggregate all the routes & virtual clusters and to create
+ * the route tables. All the ConfigMap(s) are expected to have the same version hash which is added by the sjsonnet
  * binary and hence we ignore the update if any of the ConfigMap doesn't have the same version hash.
  */
 func watchForChanges(clientSet *kubernetes.Clientset, mutex *sync.Mutex) {
@@ -528,41 +528,39 @@ func watchForChanges(clientSet *kubernetes.Clientset, mutex *sync.Mutex) {
 }
 
 /**
- * setupSnapshotUpdater set up a new snapshot updater which would set the latest snapshot to all the client nodes.
+ * setupSnapshotUpdater sets up a new snapshot updater which would set the latest snapshot to all the client nodes in
+ * the SnapshotCache.
  */
 func setupSnapshotUpdater(sc *SnapshotCache) {
 	go sc.updateSnapshotCache()
 }
 
 /**
- * updateSnapshotCache update the snapshot cache for the client nodes with the most recent snapshot.
+ * updateSnapshotCache periodically updates the SnapshotCache, which the go-control-plane would deliver to the
+ * connected watchers.
  */
 func (sc *SnapshotCache) updateSnapshotCache() {
-	for {
-		latestSnapshotEntry := snapshotVal.Load()
-		if latestSnapshotEntry != nil {
-			latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
-			latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
-			sc.mu.Lock()
-			nodesIdsSet := sc.snapshotCache.GetStatusKeys()
-			for _, nodeID := range nodesIdsSet {
-				snapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
-				if err != nil {
-					logger.Debugf("unable to get the existing snapshot for nodeID: %s", nodeID, err.Error())
-					sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
-				} else if snapshot.GetVersion(resourcesV3.RouteType) != latestSnapshotVersion {
-					sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
-				}
-			}
-			sc.mu.Unlock()
+	defer time.Sleep(1 * time.Second)
+	latestSnapshotEntry := snapshotVal.Load()
+	if latestSnapshotEntry == nil {
+		return
+	}
+	latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
+	latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
+	nodesIdsSet := sc.snapshotCache.GetStatusKeys()
+	for _, nodeID := range nodesIdsSet {
+		snapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
+		if err != nil {
+			logger.Debugf("unable to get the existing snapshot for nodeID: %s", nodeID, err.Error())
+			sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
+		} else if snapshot.GetVersion(resourcesV3.RouteType) != latestSnapshotVersion {
+			sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
 		}
-		// Add some delay
-		time.Sleep(1 * time.Second)
 	}
 }
 
 /**
- * setSnapshot set the snapshot for the given nodeID in the snapshots cache.
+ * setSnapshot sets the snapshot for the given nodeID in the SnapshotCache.
  */
 func (sc *SnapshotCache) setSnapshot(nodeID, version string, snapshot *cache.Snapshot) {
 	logger.Infof("start setting snapshot for nodeID: %s", nodeID)
@@ -576,7 +574,7 @@ func (sc *SnapshotCache) setSnapshot(nodeID, version string, snapshot *cache.Sna
 }
 
 /**
- * main bootstrap the RDS server and initializes the kubernetes client, sets up watcher etc.
+ * main bootstraps the RDS server and sets up all the dependencies like k8s watcher, snapshot updater etc.
  */
 func main() {
 	flag.Parse()
