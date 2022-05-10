@@ -11,7 +11,7 @@ import (
 	coreV1 "k8s.io/api/core/v1"
 )
 
-// Decompress parse configMap, decompress it using `xz` and return a map of
+// Decompress parses configMap, decompresses it using `xz` and return a map of
 // (configMap data key -> uncompressed data bytes). For example, ("envoy-main-routes" -> <yaml-bytes>)
 // NOTE: configMap data is assumed to be compressed using `xz` and hence the same library is being uses to decompress it.
 func Decompress(configMap *coreV1.ConfigMap) (map[string][]byte, error) {

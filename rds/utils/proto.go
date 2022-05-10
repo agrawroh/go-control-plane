@@ -9,7 +9,7 @@ import (
 )
 
 /**
- * getJsonBytes convert the yamlBytes to json and return bytes array.
+ * getJSONBytes converts yamlBytes to JSON and returns the bytes.
  */
 func getJSONBytes(yamlBytes []byte) ([]byte, error) {
 	jsonBytes, err := yaml.YAMLToJSON(yamlBytes)
@@ -19,7 +19,7 @@ func getJSONBytes(yamlBytes []byte) ([]byte, error) {
 	return jsonBytes, nil
 }
 
-// ConvertYamlToRouteConfigurationProto convert yamlBytes to v3 RouteConfiguration proto.
+// ConvertYamlToRouteConfigurationProto converts yamlBytes to the v3.RouteConfiguration proto.
 func ConvertYamlToRouteConfigurationProto(yamlBytes []byte) (*v3.RouteConfiguration, error) {
 	config := &v3.RouteConfiguration{}
 	jsonBytes, err := getJSONBytes(yamlBytes)
@@ -32,7 +32,7 @@ func ConvertYamlToRouteConfigurationProto(yamlBytes []byte) (*v3.RouteConfigurat
 	return config, nil
 }
 
-// ConvertYamlToRouteProto convert yamlBytes to v3 Route proto.
+// ConvertYamlToRouteProto converts yamlBytes to the v3.Route proto.
 func ConvertYamlToRouteProto(yamlBytes []byte) (*v3.Route, error) {
 	config := &v3.Route{}
 	jsonBytes, err := getJSONBytes(yamlBytes)
@@ -45,7 +45,7 @@ func ConvertYamlToRouteProto(yamlBytes []byte) (*v3.Route, error) {
 	return config, nil
 }
 
-// ConvertYamlToVirtualClusterProto convert yamlBytes to v3 VirtualCluster proto.
+// ConvertYamlToVirtualClusterProto converts yamlBytes to the v3.VirtualCluster proto.
 func ConvertYamlToVirtualClusterProto(yamlBytes []byte) (*v3.VirtualCluster, error) {
 	config := &v3.VirtualCluster{}
 	jsonBytes, err := getJSONBytes(yamlBytes)
