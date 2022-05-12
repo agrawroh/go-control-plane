@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +31,21 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
 )
+
+/**
+ * This file has the main logic to watch for the Envoy RouteConfiguration ConfigMap(s) and aggregate the Envoy route
+ * and virtual cluster definitions to create final route tables. These route table resources are consumed by the client
+ * Envoy.
+ *
+ * There are two main threads/go-routines:
+ * 1. Kubernetes Watcher: k8s watcher watches for any updates on the ConfigMap envoy-svc-import-order-config and invokes
+ *                        updateCurrentConfigmap() for every add/change event. updateCurrentConfigmap() aggregates all
+ *                        other routes and virtual clusters ConfigMap(s) to create a snapshot and updates snapshotVal.
+ * 2. Snapshot Updater: snapshot updater reads the snapshotVal and updates snapshotCache for all the client (Envoy)
+ *                      nodes. This happens in a separate thread because snapshotCache has 1:1 mapping between nodeId
+ *                      to the snapshot, and it's possible to get requests from the client (Envoys) even after the k8s
+ *                      watcher thread finishes updating the snapshotVal.
+ */
 
 // SnapshotCache stores the snapshot for the route resources against a specific Envoy NodeID. Different nodes can
 // technically have different versions of snapshots but, in our case they are all same. It's possible for a new Envoy
@@ -91,7 +105,7 @@ func ParseServiceImportOrderConfigMap(compressedConfigMap *coreV1.ConfigMap) ([]
 /**
  * getRoutesImportOrder parses the route import order ConfigMap to get the routes & virtual clusters import order which
  * is used to aggregate the routes & virtual clusters in a specific order while creating the route tables. This and all
- * other ConfigMap(s) are defined in the universe and they are published to the namespace where this service is running
+ * other ConfigMap(s) are defined in the universe, and they are published to the namespace where this service is running
  * by a Spinnaker Pipeline for syncing route-discovery-service-config:
  * `servicemesh-control/route-discovery-service/deploy/rds-envoy-configmaps.jsonnet.TEMPLATE`
  *
@@ -435,7 +449,7 @@ func doUpdate(clientSet *kubernetes.Clientset, namespace string, svcImportOrderC
  * updateSnapshot read all the ConfigMap(s) to create final route tables and update the Snapshot when a new version of
  * the service order ConfigMap gets detected.
  */
-func updateSnapshot(clientSet *kubernetes.Clientset, watchEventChannel <-chan watch.Event, mutex *sync.Mutex) {
+func updateSnapshot(clientSet *kubernetes.Clientset, watchEventChannel <-chan watch.Event) {
 	for {
 		event, open := <-watchEventChannel
 		if open {
@@ -444,14 +458,12 @@ func updateSnapshot(clientSet *kubernetes.Clientset, watchEventChannel <-chan wa
 				fallthrough
 			case watch.Modified:
 				logger.Debugf("*** Envoy Service Import Order ConfigMap Modified ***")
-				mutex.Lock()
 				namespace := settings.ConfigMapNamespace
 				if configMap, ok := event.Object.(*coreV1.ConfigMap); ok {
 					if err := doUpdate(clientSet, namespace, configMap); err != nil {
 						logger.Errorf("error occurred while processing update", err.Error())
 					}
 				}
-				mutex.Unlock()
 			case watch.Deleted:
 				// Do Nothing
 			default:
@@ -501,8 +513,7 @@ func initKubernetesClient() *kubernetes.Clientset {
  * pulling and aggregating the data from different ConfigMap(s) on changes.
  */
 func setupWatcher(clientSet *kubernetes.Clientset) {
-	mutex := &sync.Mutex{}
-	go watchForChanges(clientSet, mutex)
+	go watchForChanges(clientSet)
 }
 
 /**
@@ -514,16 +525,19 @@ func setupWatcher(clientSet *kubernetes.Clientset) {
  * the route tables. All the ConfigMap(s) are expected to have the same version hash which is added by the sjsonnet
  * binary and hence we ignore the update if any of the ConfigMap doesn't have the same version hash.
  */
-func watchForChanges(clientSet *kubernetes.Clientset, mutex *sync.Mutex) {
+func watchForChanges(clientSet *kubernetes.Clientset) {
+	namespace := settings.ConfigMapNamespace
+	v1ConfigMap := clientSet.CoreV1().ConfigMaps(namespace)
+	// Only list `envoy-svc-import-order-config` ConfigMap
+	listOptions := metaV1.ListOptions{FieldSelector: "metadata.name=" + settings.EnvoyServiceImportOrderConfigName}
 	for {
-		namespace := settings.ConfigMapNamespace
-		watcher, err := clientSet.CoreV1().ConfigMaps(namespace).Watch(context.TODO(), metaV1.ListOptions{FieldSelector: "metadata.name=" + settings.EnvoyServiceImportOrderConfigName})
+		watcher, err := v1ConfigMap.Watch(context.TODO(), listOptions)
 		if err != nil {
 			logger.Errorf("error occurred while creating the watcher", err.Error())
 			panic(err.Error())
 		}
 		// Detect changes & update cache snapshot
-		updateSnapshot(clientSet, watcher.ResultChan(), mutex)
+		updateSnapshot(clientSet, watcher.ResultChan())
 	}
 }
 
@@ -540,22 +554,24 @@ func setupSnapshotUpdater(sc *SnapshotCache) {
  * connected watchers.
  */
 func (sc *SnapshotCache) updateSnapshotCache() {
-	defer time.Sleep(1 * time.Second)
-	latestSnapshotEntry := snapshotVal.Load()
-	if latestSnapshotEntry == nil {
-		return
-	}
-	latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
-	latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
-	nodesIdsSet := sc.snapshotCache.GetStatusKeys()
-	for _, nodeID := range nodesIdsSet {
-		snapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
-		if err != nil {
-			logger.Debugf("unable to get the existing snapshot for nodeID: %s", nodeID, err.Error())
-			sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
-		} else if snapshot.GetVersion(resourcesV3.RouteType) != latestSnapshotVersion {
-			sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
+	for {
+		latestSnapshotEntry := snapshotVal.Load()
+		if latestSnapshotEntry == nil {
+			return
 		}
+		latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
+		latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
+		nodesIdsSet := sc.snapshotCache.GetStatusKeys()
+		for _, nodeID := range nodesIdsSet {
+			snapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
+			if err != nil {
+				logger.Debugf("unable to get the existing snapshot for nodeID: %s", nodeID, err.Error())
+				sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
+			} else if snapshot.GetVersion(resourcesV3.RouteType) != latestSnapshotVersion {
+				sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
+			}
+		}
+		time.Sleep(1 * time.Second)
 	}
 }
 
