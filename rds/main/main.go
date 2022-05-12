@@ -570,7 +570,7 @@ func (sc *SnapshotCache) updateSnapshotCache() {
 	for {
 		latestSnapshotEntry := snapshotVal.Load()
 		if latestSnapshotEntry == nil {
-			return
+			continue
 		}
 		latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
 		latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
