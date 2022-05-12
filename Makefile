@@ -94,3 +94,13 @@ example: $(BINDIR)/example
 docker_tests:
 	docker build --pull -f Dockerfile.ci . -t gcp_ci && \
 	docker run -v $$(pwd):/go-control-plane $$(tty -s && echo "-it" || echo) gcp_ci /bin/bash -c /go-control-plane/build/do_ci.sh
+
+#--------------------------------------
+# RDS Control Plane Management Server
+#--------------------------------------
+.PHONY: $(BINDIR)/rds rds
+
+$(BINDIR)/rds:
+	@go build -race -o $@ rds/main/main.go
+
+rds: $(BINDIR)/rds

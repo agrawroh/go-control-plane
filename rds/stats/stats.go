@@ -51,8 +51,8 @@ var (
 	makeCounterWithRouteTableNameTagFunc = func(counterName, routeTableName string) stats.Counter {
 		return serviceScope.NewCounterWithTags(counterName, map[string]string{"routeTableName": routeTableName})
 	}
-	makeCounterWithNodeAndSnapshotTagsFunc = func(counterName, nodeId, snapshotVersion string) stats.Counter {
-		return serviceScope.NewCounterWithTags(counterName, map[string]string{"nodeId": nodeId, "snapshotVersion": snapshotVersion})
+	makeCounterWithNodeAndSnapshotTagsFunc = func(counterName, nodeID, snapshotVersion string) stats.Counter {
+		return serviceScope.NewCounterWithTags(counterName, map[string]string{"nodeId": nodeID, "snapshotVersion": snapshotVersion})
 	}
 )
 
@@ -94,12 +94,12 @@ func getCountersByRouteTable(routeTableName string) RdsStatsByRouteTable {
 /**
  * getCountersBySnapshot returns the counters with tags including the client node id and snapshot cache version.
  */
-func getCountersBySnapshot(nodeId, snapshotVersion string) RdsStatsBySnapshot {
-	key := fmt.Sprintf("%s-%s", nodeId, snapshotVersion)
+func getCountersBySnapshot(nodeID, snapshotVersion string) RdsStatsBySnapshot {
+	key := fmt.Sprintf("%s-%s", nodeID, snapshotVersion)
 	if _, exists := countersBySnapshot[key]; !exists {
 		countersBySnapshot[key] = RdsStatsBySnapshot{
-			snapshotCacheUpdateSuccessCount: makeCounterWithNodeAndSnapshotTagsFunc("snapshot_update_success_count", nodeId, snapshotVersion),
-			snapshotCacheUpdateErrorCount:   makeCounterWithNodeAndSnapshotTagsFunc("snapshot_update_error_count", nodeId, snapshotVersion),
+			snapshotCacheUpdateSuccessCount: makeCounterWithNodeAndSnapshotTagsFunc("snapshot_update_success_count", nodeID, snapshotVersion),
+			snapshotCacheUpdateErrorCount:   makeCounterWithNodeAndSnapshotTagsFunc("snapshot_update_error_count", nodeID, snapshotVersion),
 		}
 	}
 	return countersBySnapshot[key]
@@ -138,13 +138,13 @@ func RecordConfigMapItems(configMapName string, count uint64) {
 }
 
 // RecordSnapshotCacheUpdateSuccess records the number of times RDS was able to successfully update the snapshot.
-func RecordSnapshotCacheUpdateSuccess(nodeId, snapshotVersion string) {
-	getCountersBySnapshot(nodeId, snapshotVersion).snapshotCacheUpdateSuccessCount.Inc()
+func RecordSnapshotCacheUpdateSuccess(nodeID, snapshotVersion string) {
+	getCountersBySnapshot(nodeID, snapshotVersion).snapshotCacheUpdateSuccessCount.Inc()
 }
 
 // RecordSnapshotCacheUpdateError records the number of times RDS was able to failed to update the snapshot cache.
-func RecordSnapshotCacheUpdateError(nodeId, snapshotVersion string) {
-	getCountersBySnapshot(nodeId, snapshotVersion).snapshotCacheUpdateErrorCount.Inc()
+func RecordSnapshotCacheUpdateError(nodeID, snapshotVersion string) {
+	getCountersBySnapshot(nodeID, snapshotVersion).snapshotCacheUpdateErrorCount.Inc()
 }
 
 // RecordRouteTableAggregatedRoutes records the number of aggregated routes in the given Route Table.
