@@ -45,6 +45,10 @@ import (
  *                      nodes. This happens in a separate thread because snapshotCache has 1:1 mapping between nodeId
  *                      to the snapshot, and it's possible to get requests from the client (Envoys) even after the k8s
  *                      watcher thread finishes updating the snapshotVal.
+ *
+ * We don't need any mutex to sync in either of the threads as snapshotVal is the only shard variable, and it's already
+ * atomic. The k8s watcher would process the incoming events on the channel for addition/modification of the import
+ * order ConfigMap one-by-one and hence we don't need to lock/unlock when we write to snapshotVal.
  */
 
 // SnapshotCache stores the snapshot for the route resources against a specific Envoy NodeID. Different nodes can
@@ -69,19 +73,28 @@ var (
 
 // Initialize Variables
 func init() {
-	// Initialize Logger
-	logger = utils.Logger{
-		Debug: settings.DebugLogging,
-	}
 	// Initialize Settings Object
 	settings = env.NewSettings()
-	logger.Infof("settings: %s", settings)
+
+	// Initialize Logger
+	logger = utils.Logger{
+		Debug: strings.EqualFold("DEBUG", settings.LogLevel),
+		Info:  strings.EqualFold("DEBUG", settings.LogLevel) || strings.EqualFold("INFO", settings.LogLevel),
+	}
+
+	if s, err := json.Marshal(&settings); err == nil {
+		logger.Infof("settings: %s", string(s))
+	}
+
 	// Initialize Snapshot
 	snapshotVal = atomic.Value{}
 }
 
 // ParseServiceImportOrderConfigMap parses the service import order ConfigMap and return an array of service names which
 // is used while aggregating the per-service routes and virtual clusters.
+//
+// TODO: This method has been made public for testing purposes and should be refactored into a new/existing utils
+// package to facilitate testing.
 func ParseServiceImportOrderConfigMap(compressedConfigMap *coreV1.ConfigMap) ([]string, error) {
 	configMapName := compressedConfigMap.Name
 	logger.Infof("service import order ConfigMap name: %s", configMapName)
@@ -284,7 +297,7 @@ func parseRoutesConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, require
 				logger.Debugf(fmt.Sprintf("no routes defined in: '%s'", configMapName))
 			}
 		}
-		logger.Infof("total number of service routes found: %d", len(routes))
+		logger.Infof("total number of routes found for '%s': %d", importConfigName, len(routes))
 	} else {
 		routes, err = getRoutes(clientSet, k8sNamespace, importConfigName, requiredVersion)
 		if err != nil {
@@ -315,7 +328,7 @@ func parseVirtualClustersConfigMap(clientSet *kubernetes.Clientset, k8sNamespace
 				logger.Debugf(fmt.Sprintf("no virtual clusters defined in: '%s'", configMapName))
 			}
 		}
-		logger.Infof("total number of virtual clusters found: %d", len(virtualClusters))
+		logger.Infof("total number of virtual clusters found for '%s': %d", importConfigName, len(virtualClusters))
 	} else {
 		virtualClusters, err = getVirtualClusters(clientSet, k8sNamespace, importConfigName, requiredVersion)
 		if err != nil {

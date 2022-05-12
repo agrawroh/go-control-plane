@@ -88,7 +88,7 @@ func createTLSConfig(s *env.Settings) *tls.Config {
 	maxTLS, err := stringToTLSVersion(s.MaxTLSVersion)
 	checkError(err)
 
-	if s.ServerTLS {
+	if !s.ServerTLS {
 		return nil
 	}
 
@@ -145,27 +145,28 @@ func startHTTPServer(HTTPPort int, handler http.Handler, logger utils.Logger) {
  * checkStatsDServerStatus check whether StatsD container is up and running.
  */
 func checkStatsDServerStatus(statsDHost, statsDPort string, logger utils.Logger, shouldRetry bool) bool {
-	timeout := 60 * time.Second
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(statsDHost, statsDPort), timeout)
+	timeout := 30 * time.Second
+	connTimeout := 1 * time.Second
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(statsDHost, statsDPort), connTimeout)
 	if err != nil {
 		logger.Errorf("error occurred while checking StatsD container liveliness", err)
 		// If `shouldRetry` is set then wait for a minute and check the server uptime status again
 		if shouldRetry {
-			logger.Infof("would retry again in 60 seconds")
+			logger.Infof("would retry again in 30 seconds")
 			time.Sleep(timeout)
 			return checkStatsDServerStatus(statsDHost, statsDPort, logger, false)
 		}
 		return false
 	}
 	err = conn.Close()
-	return err != nil
+	return err == nil
 }
 
 // RunServer bootstrap the Route Discovery Service server.
 func RunServer(settings *env.Settings, server server.Server, logger utils.Logger) {
 	// Make sure that StatsD server is up and running
 	if !checkStatsDServerStatus(settings.StatsDHost, settings.StatsDPort, logger, true) {
-		panic("StatsD was not ready in 60 seconds.")
+		panic("StatsD was not ready in 30 seconds.")
 	}
 
 	// Setup gRPC server
@@ -190,7 +191,7 @@ func RunServer(settings *env.Settings, server server.Server, logger utils.Logger
 	setupHealthCheck(grpcServer, healthCheckRouter)
 	go startHTTPServer(settings.HTTPPort, healthCheckRouter, logger)
 	// We only add the debug server if its enabled
-	if settings.EnableDebugServer {
+	if settings.DebugServerEnabled {
 		go startHTTPServer(settings.DebugPort, http.DefaultServeMux, logger)
 	}
 

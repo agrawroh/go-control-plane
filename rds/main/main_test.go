@@ -1,4 +1,4 @@
-package main_test
+package main
 
 import (
 	"bytes"
@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/envoyproxy/go-control-plane/rds/main"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/ulikunitz/xz"
@@ -18,13 +17,16 @@ func TestParseServiceImportOrderConfigMapFail(t *testing.T) {
 	compressedConfigMap := coreV1.ConfigMap{
 		Data: map[string]string{"bar": "foo"},
 	}
-	_, err := main.ParseServiceImportOrderConfigMap(&compressedConfigMap)
+	_, err := ParseServiceImportOrderConfigMap(&compressedConfigMap)
 	expectedErrorMsg := "error occurred while parsing service import order ConfigMap: error occurred while decoding the base64 data: illegal base64 data at input byte 0"
 	assert.EqualErrorf(t, err, expectedErrorMsg, "Error should be: %v, got: %v", expectedErrorMsg, err)
 }
 
 func TestParseServiceImportOrderConfigMapSuccess(t *testing.T) {
-	text := "---\n- foo\n- bar"
+	text := `---
+    - foo
+    - bar
+    `
 	data, err := getTestData(text)
 	if err != nil {
 		t.Errorf("expected no errors, got '%s'", err.Error())
@@ -32,7 +34,7 @@ func TestParseServiceImportOrderConfigMapSuccess(t *testing.T) {
 	compressedConfigMap := coreV1.ConfigMap{
 		Data: map[string]string{"svc-names": data},
 	}
-	serviceNames, err := main.ParseServiceImportOrderConfigMap(&compressedConfigMap)
+	serviceNames, err := ParseServiceImportOrderConfigMap(&compressedConfigMap)
 	// We expect ParseServiceImportOrderConfigMap function to return two service i.e. `foo` and `bar`
 	assert.Equal(t, 2, len(serviceNames))
 	assert.True(t, reflect.DeepEqual(serviceNames, []string{"foo", "bar"}))
