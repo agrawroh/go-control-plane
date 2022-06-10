@@ -47,7 +47,7 @@ func NewHealthChecker(grpcHealthServer *health.Server, name string) *HealthCheck
 	return ret
 }
 
-// ServeHTTP serve the HTTP traffic for health checks.
+// ServeHTTP serves the HTTP traffic for health checks.
 func (hc *HealthChecker) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 	// Kubernetes would expect 2XX/3XX status codes as successes and 4XX/5XX status codes as failures.
 	if ok := atomic.LoadUint32(&hc.ok); ok == 1 {
@@ -61,13 +61,15 @@ func (hc *HealthChecker) ServeHTTP(writer http.ResponseWriter, _ *http.Request) 
 	}
 }
 
-// Fail set the ServingStatus to `NOT_SERVING` which would make the health checks fail.
+// Fail sets the ServingStatus to `NOT_SERVING` which would make the health checks fail.
+//
+// It's for test only.
 func (hc *HealthChecker) Fail() {
 	atomic.StoreUint32(&hc.ok, 0)
 	hc.grpcServer.SetServingStatus(hc.name, healthPb.HealthCheckResponse_NOT_SERVING)
 }
 
-// Server return the gRPC health check server instance.
+// Server returns the gRPC health check server instance.
 func (hc *HealthChecker) Server() *health.Server {
 	return hc.grpcServer
 }

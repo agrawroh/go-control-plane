@@ -29,7 +29,7 @@ import (
 )
 
 /**
- * checkError check and panic in case of an error.
+ * checkError checks and panic in case of an error.
  */
 func checkError(err error) {
 	if err != nil {
@@ -37,9 +37,6 @@ func checkError(err error) {
 	}
 }
 
-/**
- * stringToTLSVersion utility method to convert the version string to TLS version enum.
- */
 func stringToTLSVersion(version string) (uint16, error) {
 	var res uint16
 	switch version {
@@ -61,7 +58,7 @@ func stringToTLSVersion(version string) (uint16, error) {
 }
 
 /**
- * getCertificatePool create a new certificate pool by reading all the CA certificates.
+ * getCertificatePool creates a new certificate pool by reading all the CA certificates.
  */
 func getCertificatePool(cAPath string) (*x509.CertPool, error) {
 	if cAPath == "" {
@@ -79,7 +76,7 @@ func getCertificatePool(cAPath string) (*x509.CertPool, error) {
 }
 
 /**
- * createTLSConfig create TLS configuration for HTTPS server.
+ * createTLSConfig creates TLS configuration for HTTPS server.
  */
 func createTLSConfig(s *env.Settings) *tls.Config {
 	var err error
