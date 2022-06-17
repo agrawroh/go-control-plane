@@ -155,7 +155,7 @@ func benchmarkParallelReads(clientSet *kubernetes.Clientset) {
 		configMapItem := configMapItem
 		go func(index int) {
 			// Read ConfigMap
-			configMap, _ := getConfigMap(clientSet, namespace, configMapItem.Name)
+			configMap, _ := clientSet.CoreV1().ConfigMaps(namespace).Get(context.TODO(), configMapItem.Name, metaV1.GetOptions{})
 			for key := range configMap.Data {
 				// Store the key of ConfigMap as the result
 				resParallel[index] = key
