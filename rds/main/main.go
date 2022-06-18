@@ -68,7 +68,8 @@ var (
 	snapshotVal atomic.Value
 	// settings contains the config flag values which are either the declared default or the values set by using the
 	// environment variables.
-	settings env.Settings
+	settings       env.Settings
+	configMapCache *utils.ConfigMapCache
 )
 
 // Initialize Variables
@@ -88,6 +89,7 @@ func init() {
 
 	// Initialize Snapshot
 	snapshotVal = atomic.Value{}
+	configMapCache = utils.NewConfigMapCache()
 }
 
 // ParseServiceImportOrderConfigMap parses the service import order ConfigMap and return an array of service names which
@@ -164,11 +166,17 @@ func getRoutesImportOrder(clientSet *kubernetes.Clientset, k8sNamespace, require
  * get the correct/required version hash even after waiting then we give up and return an error.
  */
 func getConfigMap(clientSet *kubernetes.Clientset, configMapName, k8sNamespace, requiredVersion string, shouldWaitForSync bool) (*coreV1.ConfigMap, error) {
-	configMap, err := clientSet.CoreV1().ConfigMaps(k8sNamespace).Get(context.TODO(), configMapName, metaV1.GetOptions{})
-	if err != nil {
-		stats.RecordConfigMapFetchError(configMapName)
-		return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetching ConfigMap: %s", configMapName))
+	configMap, cacheHit := configMapCache.Get(configMapName, requiredVersion)
+	if configMap == nil {
+		cm, err := clientSet.CoreV1().ConfigMaps(k8sNamespace).Get(context.TODO(), configMapName, metaV1.GetOptions{})
+
+		if err != nil {
+			stats.RecordConfigMapFetchError(configMapName)
+			return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetching ConfigMap: %s", configMapName))
+		}
+		configMap = cm
 	}
+
 	// This version hash is computed by the Scala JSONNET (sjsonnet) binary and is added to all the RDS ConfigMap(s)
 	// i.e. Routes and Service Configurations, Import Orders, etc.
 	configMapVersion, versionLabelFound := configMap.Labels["versionHash"]
@@ -183,6 +191,10 @@ func getConfigMap(clientSet *kubernetes.Clientset, configMapName, k8sNamespace, 
 			return getConfigMap(clientSet, configMapName, k8sNamespace, requiredVersion, false)
 		}
 		return nil, fmt.Errorf("version hash mismatch on the ConfigMap: %s. Required: %s, Received: %s", configMapName, requiredVersion, configMapVersion)
+	}
+	// Only put new config in cache after verifying it's the required version.
+	if !cacheHit {
+		configMapCache.Put(configMapName, requiredVersion, configMap)
 	}
 	return configMap, nil
 }
