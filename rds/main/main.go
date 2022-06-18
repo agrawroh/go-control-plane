@@ -297,11 +297,16 @@ func (c KubernetesClient) aggregateVirtualClusters(k8sNamespace, requiredVersion
 	return aggregatedVirtualClusters, nil
 }
 
+/**
+ * getSvcRoutePrefix returns a service route prefix based on the passed config name. This prefix would be used
+ *                   to fetch per-service ConfigMap(s) for routes. For example,
+ *                   prefix = envoy-main-route-
+ *                   configMapName = envoy-main-route-authN, envoy-main-route-mlflow, envoy-main-route-jobs, ...
+ */
 func getSvcRoutePrefix(configName string) (prefix string, ok bool) {
 	serviceRoutesSuffix := "-svc-routes"
 	serviceVirtualClusterSuffix := "-vc-svc-routes"
-	// service route and virtual cluster route share the same suffix, so need to
-	// verify both.
+	// service route and virtual cluster route share the same suffix, so need to verify both.
 	if strings.Contains(configName, serviceRoutesSuffix) && !strings.Contains(configName, serviceVirtualClusterSuffix) {
 		return strings.Split(configName, serviceRoutesSuffix)[0], true
 	}
@@ -336,6 +341,12 @@ func (c KubernetesClient) parseRoutesConfigMap(k8sNamespace, requiredVersion, im
 	return routes, nil
 }
 
+/**
+ * getVcRoutePrefix returns a service virtual cluster prefix based on the passed config name. This prefix would be used
+ *                  to fetch per-service ConfigMap(s) for virtual clusters. For example,
+ *                  prefix = envoy-main-vc-
+ *                  configMapName = envoy-main-vc-authN, envoy-main-vc-cluster-manager, envoy-main-vc-jobs, ...
+ */
 func getVcRoutePrefix(configName string) (prefix string, ok bool) {
 	serviceRoutesSuffix := "-svc-routes"
 	serviceVirtualClusterSuffix := "-vc-svc-routes"
@@ -500,20 +511,35 @@ func (c KubernetesClient) doUpdate(namespace string, svcImportOrderConfigMap *co
 }
 
 /**
- * initKubernetesClient initializes the kubernetes client which is used to fetch the ConfigMap(s).
+ * getKubernetesClientConfig creates and returns a new kubernetes client configuration.
  */
-func initKubernetesClient() KubernetesClient {
-	logger.Infof("start initializing the kubernetes client...")
-
+func getKubernetesClientConfig() *rest.Config {
 	// Create In-Cluster Config
 	inClusterConfig, err := rest.InClusterConfig()
 	if err != nil {
 		logger.Errorf("error occurred while creating in-cluster config", err.Error())
 		panic(err.Error())
 	}
+	return &rest.Config{
+		Host:            inClusterConfig.Host,
+		TLSClientConfig: inClusterConfig.TLSClientConfig,
+		BearerToken:     inClusterConfig.BearerToken,
+		BearerTokenFile: inClusterConfig.BearerTokenFile,
+		// Current QPS & Burst are too low which results in the client-side throttling and hence we are increasing these
+		// limits to see if it has any positive impact on the performance while fetching the ConfigMap(s) in parallel.
+		QPS:   settings.ClientQPS,
+		Burst: settings.ClientBurst,
+	}
+}
+
+/**
+ * initKubernetesClient initializes the kubernetes client which is used to fetch the ConfigMap(s).
+ */
+func initKubernetesClient() KubernetesClient {
+	logger.Infof("start initializing the kubernetes client...")
 
 	// Create ClientSet
-	clientSet, err := kubernetes.NewForConfig(inClusterConfig)
+	clientSet, err := kubernetes.NewForConfig(getKubernetesClientConfig())
 	if err != nil {
 		logger.Errorf("error occurred while creating the new kubernetes client-set", err.Error())
 		panic(err.Error())
