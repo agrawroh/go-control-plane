@@ -26,6 +26,7 @@ func TestConvertYamlToRouteProtoError(t *testing.T) {
 	_, err := utils.ConvertYamlToRouteProto([]byte("bar"))
 	expectedErrorMsg := "error occurred while converting YAML -> v3.Route protobuf"
 	assert.Containsf(t, err.Error(), expectedErrorMsg, "Error should be: %v, got: %v", expectedErrorMsg, err)
+	assert.Equal(t, 1, 0)
 }
 
 func TestConvertYamlToRouteProtoSuccess(t *testing.T) {

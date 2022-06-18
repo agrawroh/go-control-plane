@@ -277,24 +277,33 @@ func aggregateVirtualClusters(clientSet *kubernetes.Clientset, k8sNamespace, req
 	return aggregatedVirtualClusters, nil
 }
 
+func getSvcRoutePrefix(configName string) (prefix string, ok bool) {
+	serviceRoutesSuffix := "-svc-routes"
+	serviceVirtualClusterSuffix := "-vc-svc-routes"
+	// service route and virtual cluster rout eshare the same suffix, so need to
+	// verify both.
+	if strings.Contains(configName, serviceRoutesSuffix) && !strings.Contains(configName, serviceVirtualClusterSuffix) {
+		return strings.Split(configName, serviceRoutesSuffix)[0], true
+	}
+	return "", false
+}
+
 /**
  * parseRoutesConfigMap read all the routes k8s ConfigMap(s) and returns an aggregated slice of v3.Route.
  */
 func parseRoutesConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, requiredVersion, importConfigName string, serviceNames []string) (routes []*v3.Route, err error) {
-	serviceRoutesSuffix := "-svc-routes"
-	serviceVirtualClusterSuffix := "-vc-svc-routes"
-	if strings.Contains(importConfigName, serviceRoutesSuffix) && !strings.Contains(importConfigName, serviceVirtualClusterSuffix) {
-		prefix := strings.Split(importConfigName, serviceRoutesSuffix)[0]
+	svcRoutePrefix, ok := getSvcRoutePrefix(importConfigName)
+	if ok {
 		// Service Routes
 		for _, serviceName := range serviceNames {
-			configMapName := fmt.Sprintf("%s-%s", prefix, serviceName)
+			configMapName := fmt.Sprintf("%s-%s", svcRoutePrefix, serviceName)
 			serviceRoutes, err := getRoutes(clientSet, k8sNamespace, configMapName, requiredVersion)
 			if err != nil {
 				return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetchig the route ConfigMap: '%s'", configMapName))
 			} else if len(serviceRoutes) > 0 {
 				routes = append(routes, serviceRoutes...)
 			} else {
-				logger.Debugf(fmt.Sprintf("no routes defined in: '%s'", configMapName))
+				logger.Infof(fmt.Sprintf("no routes defined in: '%s'", configMapName))
 			}
 		}
 		logger.Infof("total number of routes found for '%s': %d", importConfigName, len(routes))
@@ -307,25 +316,32 @@ func parseRoutesConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, require
 	return routes, nil
 }
 
+func getVcRoutePrefix(configName string) (prefix string, ok bool) {
+	serviceRoutesSuffix := "-svc-routes"
+	serviceVirtualClusterSuffix := "-vc-svc-routes"
+	if strings.Contains(configName, serviceVirtualClusterSuffix) {
+		return strings.Split(configName, serviceRoutesSuffix)[0], true
+	}
+	return "", false
+}
+
 /**
  * parseVirtualClustersConfigMap read all the virtual clusters k8s ConfigMap(s) and returns an aggregated slice of
  * v3.VirtualCluster.
  */
 func parseVirtualClustersConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, requiredVersion, importConfigName string, serviceNames []string) (virtualClusters []*v3.VirtualCluster, err error) {
-	serviceRoutesSuffix := "-svc-routes"
-	serviceVirtualClusterSuffix := "-vc-svc-routes"
-	if strings.Contains(importConfigName, serviceVirtualClusterSuffix) {
-		prefix := strings.Split(importConfigName, serviceRoutesSuffix)[0]
+	vcRoutePrefix, ok := getVcRoutePrefix(importConfigName)
+	if ok {
 		// Service Virtual Clusters
 		for _, serviceName := range serviceNames {
-			configMapName := fmt.Sprintf("%s-%s", prefix, serviceName)
+			configMapName := fmt.Sprintf("%s-%s", vcRoutePrefix, serviceName)
 			serviceVirtualClusters, err := getVirtualClusters(clientSet, k8sNamespace, configMapName, requiredVersion)
 			if err != nil {
 				return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetchig the virtual cluster ConfigMap: '%s'", configMapName))
 			} else if len(serviceVirtualClusters) > 0 {
 				virtualClusters = append(virtualClusters, serviceVirtualClusters...)
 			} else {
-				logger.Debugf(fmt.Sprintf("no virtual clusters defined in: '%s'", configMapName))
+				logger.Infof(fmt.Sprintf("no virtual clusters defined in: '%s'", configMapName))
 			}
 		}
 		logger.Infof("total number of virtual clusters found for '%s': %d", importConfigName, len(virtualClusters))
@@ -443,7 +459,7 @@ func doUpdate(clientSet *kubernetes.Clientset, namespace string, svcImportOrderC
 		routesResource[index] = routeTable
 	}
 	versionID := time.Now().Format("2006-01-02T15-04-05")
-	logger.Debugf("creating new snapshot with version: %s", versionID)
+	logger.Infof("creating new snapshot with version: %s", versionID)
 	newSnapshot, err := cache.NewSnapshot(
 		versionID,
 		map[resourcesV3.Type][]types.Resource{
@@ -470,7 +486,7 @@ func updateSnapshot(clientSet *kubernetes.Clientset, watchEventChannel <-chan wa
 			case watch.Added:
 				fallthrough
 			case watch.Modified:
-				logger.Debugf("*** Envoy Service Import Order ConfigMap Modified ***")
+				logger.Infof("*** Envoy Service Import Order ConfigMap Modified ***")
 				namespace := settings.ConfigMapNamespace
 				if configMap, ok := event.Object.(*coreV1.ConfigMap); ok {
 					if err := doUpdate(clientSet, namespace, configMap); err != nil {
@@ -493,7 +509,7 @@ func updateSnapshot(clientSet *kubernetes.Clientset, watchEventChannel <-chan wa
  * initKubernetesClient initializes the kubernetes client which is used to fetch the ConfigMap(s).
  */
 func initKubernetesClient() *kubernetes.Clientset {
-	logger.Debugf("start initializing the kubernetes client...")
+	logger.Infof("start initializing the kubernetes client...")
 
 	// Create In-Cluster Config
 	inClusterConfig, err := rest.InClusterConfig()
@@ -578,7 +594,7 @@ func (sc *SnapshotCache) updateSnapshotCache() {
 		for _, nodeID := range nodesIdsSet {
 			snapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
 			if err != nil {
-				logger.Debugf("unable to get the existing snapshot for nodeID: %s", nodeID, err.Error())
+				logger.Infof("unable to get the existing snapshot for nodeID: %s", nodeID, err.Error())
 				sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
 			} else if snapshot.GetVersion(resourcesV3.RouteType) != latestSnapshotVersion {
 				sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
