@@ -15,6 +15,10 @@ type Settings struct {
 	StatsDHost         string `envconfig:"STATSD_HOST" default:"localhost"`
 	DebugServerEnabled bool   `envconfig:"DEBUG_SERVER_ENABLED" default:"false"`
 
+	// Kubernetes Client Configuration
+	ClientQPS   float32 `envconfig:"K8S_CLIENT_QPS" default:"100"`
+	ClientBurst int     `envconfig:"K8S_CLIENT_BURST" default:"150"`
+
 	// ConfigMap(s)
 	ConfigMapNamespace                 string `envconfig:"CONFIG_MAP_NAMESPACE" default:"default"`
 	SyncDelayTimeSeconds               int    `envconfig:"CONFIG_MAP_SYNC_DELAY_TIME_SECONDS" default:"60"`
