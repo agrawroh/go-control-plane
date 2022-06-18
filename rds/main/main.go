@@ -122,19 +122,19 @@ func benchmarkSequentialReads(clientSet *kubernetes.Clientset) {
 	// Get the list of ConfigMaps
 	configMapsList, _ := clientSet.CoreV1().ConfigMaps(namespace).List(context.TODO(), metaV1.ListOptions{})
 	numItems := len(configMapsList.Items)
-	resSequential := make([]string, numItems)
+	results := make([]string, numItems)
 
-	nanoSecBefore := time.Now().UnixNano()
+	mSecBefore := time.Now().UnixMilli()
 	for index, configMapItem := range configMapsList.Items {
 		configMap, _ := getConfigMap(clientSet, namespace, configMapItem.Name)
 		for key := range configMap.Data {
-			resSequential[index] = key
+			results[index] = key
 		}
 	}
-	nanoSecAfter := time.Now().UnixNano()
+	mSecAfter := time.Now().UnixMilli()
 
-	logger.Infof("nanoseconds Elapsed (Sequential): %d", nanoSecAfter-nanoSecBefore)
-	logger.Infof("results: %s", resSequential)
+	logger.Infof("seconds elapsed (Sequential): %f", (mSecAfter-mSecBefore)/1000)
+	logger.Infof("#results: %d", len(results))
 }
 
 /*
@@ -145,33 +145,33 @@ func benchmarkParallelReads(clientSet *kubernetes.Clientset) {
 	// Get the namespace from the settings
 	namespace := settings.ConfigMapNamespace
 	// Get the list of ConfigMaps
-	configMapsListParallel, _ := clientSet.CoreV1().ConfigMaps(namespace).List(context.TODO(), metaV1.ListOptions{})
-	numItemsParallel := len(configMapsListParallel.Items)
-	semaphore := make(chan struct{}, numItemsParallel)
-	resParallel := make([]string, numItemsParallel)
+	configMapsList, _ := clientSet.CoreV1().ConfigMaps(namespace).List(context.TODO(), metaV1.ListOptions{})
+	numItems := len(configMapsList.Items)
+	semaphore := make(chan struct{}, numItems)
+	results := make([]string, numItems)
 
-	nanoSecBeforeStartParallel := time.Now().UnixNano()
-	for index, configMapItem := range configMapsListParallel.Items {
+	mSecBefore := time.Now().UnixMilli()
+	for index, configMapItem := range configMapsList.Items {
 		configMapItem := configMapItem
 		go func(index int) {
 			// Read ConfigMap
 			configMap, _ := clientSet.CoreV1().ConfigMaps(namespace).Get(context.TODO(), configMapItem.Name, metaV1.GetOptions{})
 			for key := range configMap.Data {
 				// Store the key of ConfigMap as the result
-				resParallel[index] = key
+				results[index] = key
 			}
 			semaphore <- struct{}{}
 		}(index)
 	}
 
 	// Wait for all the goroutines to finish
-	for i := 0; i < numItemsParallel; i++ {
+	for i := 0; i < numItems; i++ {
 		<-semaphore
 	}
 
-	nanoSecAfterParallelFinish := time.Now().UnixNano()
-	logger.Infof("nanoseconds Elapsed (Parallel): %d", nanoSecAfterParallelFinish-nanoSecBeforeStartParallel)
-	logger.Infof("results: %s", resParallel)
+	mSecAfter := time.Now().UnixMilli()
+	logger.Infof("seconds elapsed (Parallel): %f", (mSecAfter-mSecBefore)/1000)
+	logger.Infof("#results: %d", len(results))
 }
 
 /**
