@@ -105,6 +105,18 @@ func getCountersBySnapshot(nodeID, snapshotVersion string) RdsStatsBySnapshot {
 	return countersBySnapshot[key]
 }
 
+// InitializeConfigMapCounter initializes all the counters for a given ConfigMap.
+func InitializeConfigMapCounter(configMapName string) {
+	countersByConfigMap[configMapName] = RdsStatsByConfigMap{
+		configMapFetchErrorCount:       makeCounterWithConfigMapNameTagFunc("config_map_fetch_error_count", configMapName),
+		configMapParseErrorCount:       makeCounterWithConfigMapNameTagFunc("config_map_parse_error_count", configMapName),
+		configMapParseSuccessCount:     makeCounterWithConfigMapNameTagFunc("config_map_parse_success_count", configMapName),
+		configMapDataErrorCount:        makeCounterWithConfigMapNameTagFunc("config_map_data_error_count", configMapName),
+		configMapProcessedSuccessCount: makeCounterWithConfigMapNameTagFunc("config_map_processed_success_count", configMapName),
+		configMapItemsCount:            makeCounterWithConfigMapNameTagFunc("config_map_items_count", configMapName),
+	}
+}
+
 // RecordConfigMapFetchError records the number of times k8s failed to fetch a given ConfigMap.
 func RecordConfigMapFetchError(configMapName string) {
 	getCountersByConfigMap(configMapName).configMapFetchErrorCount.Inc()

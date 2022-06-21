@@ -227,35 +227,49 @@ func getRouteConfigurations(clientSet *kubernetes.Clientset, k8sNamespace, requi
 	}
 
 	// Read all the route table configs
-	var routeTables []*v3.RouteConfiguration
+	semaphore := make(chan *v3.RouteConfiguration, len(configMap))
+	routeTables := make([]*v3.RouteConfiguration, len(configMap))
 	for name, yamlBytes := range configMap {
 		logger.Infof("start creating route table '%s' with version hash '%s'", name, requiredVersion)
-		routeTablePb, err := utils.ConvertYamlToRouteConfigurationProto(yamlBytes)
-		if err != nil {
-			stats.RecordConfigMapDataError(configMapName)
-			return nil, errors.Wrap(err, "error occurred while creating v3.RouteConfiguration proto from the ConfigMap data")
-		}
-		// Append Routes
-		aggregatedRoutes, err := aggregateRoutes(clientSet, k8sNamespace, requiredVersion, serviceNames, routesImportOrderMap[name]["routes"])
-		if err != nil {
-			stats.RecordRouteTableCreateError(name)
-			return nil, errors.Wrap(err, fmt.Sprintf("error occurred while aggregating the routes for route table: %s", name))
-		}
-		stats.RecordRouteTableAggregatedRoutes(name, uint64(len(aggregatedRoutes)))
-		routeTablePb.VirtualHosts[0].Routes = append(routeTablePb.VirtualHosts[0].Routes, aggregatedRoutes...)
-		stats.RecordRouteTableTotalRoutes(name, uint64(len(routeTablePb.VirtualHosts[0].Routes)))
-		// Append Virtual Clusters
-		aggregatedVirtualClusters, err := aggregateVirtualClusters(clientSet, k8sNamespace, requiredVersion, serviceNames, routesImportOrderMap[name]["virtualClusters"])
-		if err != nil {
-			stats.RecordRouteTableCreateError(name)
-			return nil, errors.Wrap(err, fmt.Sprintf("error occurred while aggregating the virtual clusters for route table: %s", name))
-		}
-		stats.RecordRouteTableAggregatedVirtualClusters(name, uint64(len(aggregatedVirtualClusters)))
-		routeTablePb.VirtualHosts[0].VirtualClusters = append(routeTablePb.VirtualHosts[0].VirtualClusters, aggregatedVirtualClusters...)
-		stats.RecordRouteTableTotalVirtualClusters(name, uint64(len(routeTablePb.VirtualHosts[0].VirtualClusters)))
-		logger.Infof("finished creating the route table: %s", name)
-		stats.RecordRouteTableCreateSuccess(name)
-		routeTables = append(routeTables, routeTablePb)
+		go func(name string, yamlBytes []byte) {
+			routeTablePb, err := utils.ConvertYamlToRouteConfigurationProto(yamlBytes)
+			if err != nil {
+				stats.RecordConfigMapDataError(configMapName)
+				logger.Errorf(fmt.Sprintf("error occurred while creating v3.RouteConfiguration proto from the ConfigMap data"))
+				semaphore <- nil
+				return
+			}
+			// Append Routes
+			aggregatedRoutes, err := aggregateRoutes(clientSet, k8sNamespace, requiredVersion, serviceNames, routesImportOrderMap[name]["routes"])
+			if err != nil {
+				stats.RecordRouteTableCreateError(name)
+				logger.Errorf(fmt.Sprintf("error occurred while aggregating the routes for route table: %s", name))
+				semaphore <- nil
+				return
+			}
+			stats.RecordRouteTableAggregatedRoutes(name, uint64(len(aggregatedRoutes)))
+			routeTablePb.VirtualHosts[0].Routes = append(routeTablePb.VirtualHosts[0].Routes, aggregatedRoutes...)
+			stats.RecordRouteTableTotalRoutes(name, uint64(len(routeTablePb.VirtualHosts[0].Routes)))
+			// Append Virtual Clusters
+			aggregatedVirtualClusters, err := aggregateVirtualClusters(clientSet, k8sNamespace, requiredVersion, serviceNames, routesImportOrderMap[name]["virtualClusters"])
+			if err != nil {
+				stats.RecordRouteTableCreateError(name)
+				logger.Errorf(fmt.Sprintf("error occurred while aggregating the virtual clusters for route table: %s", name))
+				semaphore <- nil
+				return
+			}
+			stats.RecordRouteTableAggregatedVirtualClusters(name, uint64(len(aggregatedVirtualClusters)))
+			routeTablePb.VirtualHosts[0].VirtualClusters = append(routeTablePb.VirtualHosts[0].VirtualClusters, aggregatedVirtualClusters...)
+			stats.RecordRouteTableTotalVirtualClusters(name, uint64(len(routeTablePb.VirtualHosts[0].VirtualClusters)))
+			logger.Infof("finished creating the route table: %s", name)
+			stats.RecordRouteTableCreateSuccess(name)
+			semaphore <- routeTablePb
+		}(name, yamlBytes)
+	}
+
+	// Wait for all the goroutines to finish
+	for range configMap {
+		routeTables = append(routeTables, <-semaphore)
 	}
 	stats.RecordConfigMapProcessedSuccessError(configMapName)
 	return routeTables, nil
@@ -312,15 +326,26 @@ func parseRoutesConfigMap(clientSet *kubernetes.Clientset, k8sNamespace, require
 	svcRoutePrefix, ok := getSvcRoutePrefix(importConfigName)
 	if ok {
 		// Service Routes
+		semaphore := make(chan []*v3.Route, len(serviceNames))
 		for _, serviceName := range serviceNames {
 			configMapName := fmt.Sprintf("%s-%s", svcRoutePrefix, serviceName)
-			serviceRoutes, err := getRoutes(clientSet, k8sNamespace, configMapName, requiredVersion)
-			if err != nil {
-				return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetchig the route ConfigMap: '%s'", configMapName))
-			} else if len(serviceRoutes) > 0 {
-				routes = append(routes, serviceRoutes...)
-			} else {
-				logger.Infof(fmt.Sprintf("no routes defined in: '%s'", configMapName))
+			go func(configMapName string) {
+				serviceRoutes, err := getRoutes(clientSet, k8sNamespace, configMapName, requiredVersion)
+				if err != nil {
+					logger.Errorf(fmt.Sprintf("error occurred while fetching the route ConfigMap: '%s'", configMapName))
+					semaphore <- nil
+				} else if len(serviceRoutes) > 0 {
+					semaphore <- serviceRoutes
+				} else {
+					logger.Infof(fmt.Sprintf("no routes defined in: '%s'", configMapName))
+					semaphore <- nil
+				}
+			}(configMapName)
+		}
+		// Wait for all the goroutines to finish
+		for range serviceNames {
+			if perSvcRoutes := <-semaphore; perSvcRoutes != nil {
+				routes = append(routes, perSvcRoutes...)
 			}
 		}
 		logger.Infof("total number of routes found for '%s': %d", importConfigName, len(routes))
@@ -356,15 +381,26 @@ func parseVirtualClustersConfigMap(clientSet *kubernetes.Clientset, k8sNamespace
 	vcRoutePrefix, ok := getVcRoutePrefix(importConfigName)
 	if ok {
 		// Service Virtual Clusters
+		semaphore := make(chan []*v3.VirtualCluster, len(serviceNames))
 		for _, serviceName := range serviceNames {
 			configMapName := fmt.Sprintf("%s-%s", vcRoutePrefix, serviceName)
-			serviceVirtualClusters, err := getVirtualClusters(clientSet, k8sNamespace, configMapName, requiredVersion)
-			if err != nil {
-				return nil, errors.Wrap(err, fmt.Sprintf("error occurred while fetchig the virtual cluster ConfigMap: '%s'", configMapName))
-			} else if len(serviceVirtualClusters) > 0 {
-				virtualClusters = append(virtualClusters, serviceVirtualClusters...)
-			} else {
-				logger.Infof(fmt.Sprintf("no virtual clusters defined in: '%s'", configMapName))
+			go func(configMapName string) {
+				serviceVirtualClusters, err := getVirtualClusters(clientSet, k8sNamespace, configMapName, requiredVersion)
+				if err != nil {
+					logger.Errorf(fmt.Sprintf("error occurred while fetching the virtual cluster ConfigMap: '%s'", configMapName))
+					semaphore <- nil
+				} else if len(serviceVirtualClusters) > 0 {
+					semaphore <- serviceVirtualClusters
+				} else {
+					logger.Infof(fmt.Sprintf("no virtual clusters defined in: '%s'", configMapName))
+					semaphore <- nil
+				}
+			}(configMapName)
+		}
+		// Wait for all the goroutines to finish
+		for range serviceNames {
+			if perSvcVirtualClusters := <-semaphore; perSvcVirtualClusters != nil {
+				virtualClusters = append(virtualClusters, perSvcVirtualClusters...)
 			}
 		}
 		logger.Infof("total number of virtual clusters found for '%s': %d", importConfigName, len(virtualClusters))
@@ -473,6 +509,7 @@ func doUpdate(clientSet *kubernetes.Clientset, namespace string, svcImportOrderC
 	// It can take a while to sync all the ConfigMap(s) and hence wait for some time before start
 	// the aggregation.
 	time.Sleep(time.Duration(settings.SyncDelayTimeSeconds) * time.Second)
+	getNamespacedConfigMaps(clientSet, settings.ConfigMapNamespace)
 	routeTables, err := getRouteConfigurations(clientSet, namespace, configMapVersion, serviceNames)
 	if err != nil {
 		return errors.Wrap(err, "failed to get route table(s)")
@@ -654,6 +691,36 @@ func (sc *SnapshotCache) setSnapshot(nodeID, version string, snapshot *cache.Sna
 		stats.RecordSnapshotCacheUpdateSuccess(nodeID, version)
 		logger.Infof("successfully updated the snapshot cache for nodeID: %s", nodeID)
 	}
+}
+
+/*
+ * getNamespacedConfigMaps read all the ConfigMap(s) present in the given namespace and put them into the cache.
+ */
+func getNamespacedConfigMaps(clientSet *kubernetes.Clientset, k8sNamespace string) {
+	// Get the list of ConfigMaps
+	configMapsList, _ := clientSet.CoreV1().ConfigMaps(k8sNamespace).List(context.TODO(), metaV1.ListOptions{LabelSelector: "versionHash"})
+	numItems := len(configMapsList.Items)
+	semaphore := make(chan string, numItems)
+	results := make([]string, numItems)
+
+	mSecBefore := time.Now().UnixMilli()
+	for index, configMapItem := range configMapsList.Items {
+		configMapItem := configMapItem
+		go func(index int) {
+			configMap, _ := clientSet.CoreV1().ConfigMaps(k8sNamespace).Get(context.TODO(), configMapItem.Name, metaV1.GetOptions{})
+			configMapCache.Put(configMapItem.Name, configMap.Labels["versionHash"], configMap)
+			semaphore <- configMapItem.Name
+		}(index)
+	}
+
+	// Wait for all the goroutines to finish
+	for range configMapsList.Items {
+		stats.InitializeConfigMapCounter(<-semaphore)
+	}
+
+	mSecAfter := time.Now().UnixMilli()
+	logger.Infof("seconds elapsed (Parallel): %d", (mSecAfter-mSecBefore)/1000)
+	logger.Infof("#results: %d", len(results))
 }
 
 /**
