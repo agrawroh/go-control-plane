@@ -22,7 +22,6 @@ import (
 
 	coreV1 "k8s.io/api/core/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
@@ -70,6 +69,9 @@ var (
 	// environment variables.
 	settings       env.Settings
 	configMapCache *utils.ConfigMapCache
+	// The last good version successfully pushed to all connected Envoys. It's an
+	// empty string if no config has been pushed successfully yet.
+	lastGoodVersion string
 )
 
 // Initialize Variables
@@ -90,6 +92,7 @@ func init() {
 	// Initialize Snapshot
 	snapshotVal = atomic.Value{}
 	configMapCache = utils.NewConfigMapCache()
+	lastGoodVersion = ""
 }
 
 // ParseServiceImportOrderConfigMap parses the service import order ConfigMap and return an array of service names which
@@ -455,6 +458,10 @@ func doUpdate(clientSet *kubernetes.Clientset, namespace string, svcImportOrderC
 	if !versionLabelFound {
 		return errors.New("failed to get version label from the import order ConfigMap")
 	}
+	if configMapVersion == lastGoodVersion {
+		logger.Infof("Latest version is the same as last good version %s. Skipping update.", lastGoodVersion)
+		return nil
+	}
 	serviceNames, err := ParseServiceImportOrderConfigMap(svcImportOrderConfigMap)
 	if err != nil {
 		return errors.Wrap(err, "failed to get service names from the import order")
@@ -482,39 +489,9 @@ func doUpdate(clientSet *kubernetes.Clientset, namespace string, svcImportOrderC
 		return errors.Wrap(err, "error occurred while updating the cache snapshot")
 	}
 	snapshotVal.Store(*newSnapshot)
+	lastGoodVersion = configMapVersion
 	logger.Infof("successfully updated snapshot with version: %s", versionID)
 	return nil
-}
-
-/**
- * updateSnapshot read all the ConfigMap(s) to create final route tables and update the Snapshot when a new version of
- * the service order ConfigMap gets detected.
- */
-func updateSnapshot(clientSet *kubernetes.Clientset, watchEventChannel <-chan watch.Event) {
-	for {
-		event, open := <-watchEventChannel
-		if open {
-			switch event.Type {
-			case watch.Added:
-				fallthrough
-			case watch.Modified:
-				logger.Infof("*** Envoy Service Import Order ConfigMap Modified ***")
-				namespace := settings.ConfigMapNamespace
-				if configMap, ok := event.Object.(*coreV1.ConfigMap); ok {
-					if err := doUpdate(clientSet, namespace, configMap); err != nil {
-						logger.Errorf("error occurred while processing update", err.Error())
-					}
-				}
-			case watch.Deleted:
-				// Do Nothing
-			default:
-				// Do Nothing
-			}
-		} else {
-			// If eventChannel is closed, it means the server has closed the connection
-			return
-		}
-	}
 }
 
 /**
@@ -554,7 +531,7 @@ func initKubernetesClient() *kubernetes.Clientset {
  * pulling and aggregating the data from different ConfigMap(s) on changes.
  */
 func setupWatcher(clientSet *kubernetes.Clientset) {
-	go watchForChanges(clientSet)
+	go watchForChanges(clientSet, time.NewTicker(time.ParseDuration(settings.ConfigMapPollInterval)))
 }
 
 /**
@@ -566,19 +543,22 @@ func setupWatcher(clientSet *kubernetes.Clientset) {
  * the route tables. All the ConfigMap(s) are expected to have the same version hash which is added by the sjsonnet
  * binary and hence we ignore the update if any of the ConfigMap doesn't have the same version hash.
  */
-func watchForChanges(clientSet *kubernetes.Clientset) {
+func watchForChanges(clientSet *kubernetes.Clientset, ticker *time.Ticker) {
+	defer ticker.Stop()
 	namespace := settings.ConfigMapNamespace
 	v1ConfigMap := clientSet.CoreV1().ConfigMaps(namespace)
-	// Only list `envoy-svc-import-order-config` ConfigMap
-	listOptions := metaV1.ListOptions{FieldSelector: "metadata.name=" + settings.EnvoyServiceImportOrderConfigName}
 	for {
-		watcher, err := v1ConfigMap.Watch(context.TODO(), listOptions)
-		if err != nil {
-			logger.Errorf("error occurred while creating the watcher", err.Error())
-			panic(err.Error())
+		select {
+		case <-ticker.C:
+			cm, err := v1ConfigMap.Get(context.TODO(), settings.EnvoyServiceImportOrderConfigName, metaV1.GetOptions{})
+			if err != nil {
+				logger.Errorf("error occurred while creating the watcher", err.Error())
+				panic(err.Error())
+			}
+			if err = doUpdate(clientSet, namespace, cm); err != nil {
+				logger.Errorf("error occurred while processing update", err.Error())
+			}
 		}
-		// Detect changes & update cache snapshot
-		updateSnapshot(clientSet, watcher.ResultChan())
 	}
 }
 

@@ -13,6 +13,31 @@ import (
 	coreV1 "k8s.io/api/core/v1"
 )
 
+func TestSkipUpdtae(t *testing.T) {
+	lastGoodVersion = "abcd"
+	cm := &coreV1.ConfigMap{Data: map[string]string{}}
+	cm.ObjectMeta.Labels = map[string]string{}
+	// % is invalid base64 character. If update wasn't skipped, it would result in
+	// failure.
+	cm.Data["bad-data"] = "%%%"
+
+	// First test versionHash == lastGoodVersion. Update will be skipped and
+	// invalid data won't be parsed or trigger error.
+	cm.Labels["versionHash"] = lastGoodVersion
+	err := doUpdate(nil, "unused-namespace", cm)
+	if err != nil {
+		t.Errorf("Failed to skip update: %s", err.Error())
+	}
+
+	// Next, test versionHash != lastGoodVersion. Update will NOT be skipped and
+	// invalid data triggers parsing errors.
+	cm.Labels["versionHash"] = "some-other-version"
+	err = doUpdate(nil, "unused-namespace", cm)
+	if err == nil {
+		t.Errorf("Expected error, got none.")
+	}
+}
+
 func TestParseServiceImportOrderConfigMapFail(t *testing.T) {
 	compressedConfigMap := coreV1.ConfigMap{
 		Data: map[string]string{"bar": "foo"},
