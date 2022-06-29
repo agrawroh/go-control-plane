@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"github.com/envoyproxy/go-control-plane/rds/env"
 	"io"
 	"reflect"
 	"testing"
@@ -11,9 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/ulikunitz/xz"
 	coreV1 "k8s.io/api/core/v1"
+	testClient "k8s.io/client-go/kubernetes/fake"
 )
 
-func TestSkipUpdtae(t *testing.T) {
+func TestSkipUpdate(t *testing.T) {
 	lastGoodVersion = "abcd"
 	cm := &coreV1.ConfigMap{Data: map[string]string{}}
 	cm.ObjectMeta.Labels = map[string]string{}
@@ -24,7 +26,11 @@ func TestSkipUpdtae(t *testing.T) {
 	// First test versionHash == lastGoodVersion. Update will be skipped and
 	// invalid data won't be parsed or trigger error.
 	cm.Labels["versionHash"] = lastGoodVersion
-	err := doUpdate(nil, "unused-namespace", cm)
+	client := KubernetesClient{
+		ClientSet: testClient.NewSimpleClientset(),
+	}
+	settings = env.NewSettings()
+	err := client.doUpdate("unused-namespace", cm)
 	if err != nil {
 		t.Errorf("Failed to skip update: %s", err.Error())
 	}
@@ -32,10 +38,20 @@ func TestSkipUpdtae(t *testing.T) {
 	// Next, test versionHash != lastGoodVersion. Update will NOT be skipped and
 	// invalid data triggers parsing errors.
 	cm.Labels["versionHash"] = "some-other-version"
-	err = doUpdate(nil, "unused-namespace", cm)
+	err = client.doUpdate("unused-namespace", cm)
 	if err == nil {
 		t.Errorf("Expected error, got none.")
 	}
+}
+
+func TestWatcherCreationFailOnInvalidDuration(t *testing.T) {
+	client := KubernetesClient{
+		ClientSet: testClient.NewSimpleClientset(),
+	}
+	settings = env.Settings{
+		ConfigMapPollInterval: "foo",
+	}
+	assertPanic(t, client.setupWatcher)
 }
 
 func TestParseServiceImportOrderConfigMapFail(t *testing.T) {
@@ -83,4 +99,16 @@ func getTestData(text string) (string, error) {
 		return "", errors.Wrap(err, "w.Close error")
 	}
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+}
+
+/*
+ * assertPanic asserts whether the code under test panics or not. The test would fail if the function doesn't panic.
+ */
+func assertPanic(t *testing.T, f func()) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("The code did not panic")
+		}
+	}()
+	f()
 }
