@@ -520,16 +520,13 @@ func getKubernetesClientConfig() *rest.Config {
 		logger.Errorf("error occurred while creating in-cluster config", err.Error())
 		panic(err.Error())
 	}
-	return &rest.Config{
-		Host:            inClusterConfig.Host,
-		TLSClientConfig: inClusterConfig.TLSClientConfig,
-		BearerToken:     inClusterConfig.BearerToken,
-		BearerTokenFile: inClusterConfig.BearerTokenFile,
-		// Current QPS & Burst are too low which results in the client-side throttling and hence we are increasing these
-		// limits to see if it has any positive impact on the performance while fetching the ConfigMap(s) in parallel.
-		QPS:   settings.ClientQPS,
-		Burst: settings.ClientBurst,
-	}
+
+	// Current QPS & Burst are too low which results in the client-side throttling and hence we are increasing these
+	// limits to see if it has any positive impact on the performance while fetching the ConfigMap(s) in parallel.
+	inClusterConfig.QPS = settings.ClientQPS
+	inClusterConfig.Burst = settings.ClientBurst
+
+	return inClusterConfig
 }
 
 /**

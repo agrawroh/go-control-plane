@@ -54,6 +54,16 @@ func TestWatcherCreationFailOnInvalidDuration(t *testing.T) {
 	assertPanic(t, client.setupWatcher)
 }
 
+func TestKubernetesClientConfigCreation(t *testing.T) {
+	config := getKubernetesClientConfig()
+	settings = env.Settings{
+		ClientQPS:   1000,
+		ClientBurst: 1500,
+	}
+	assert.Equal(t, 1000, config.QPS)
+	assert.Equal(t, 1500, config.Burst)
+}
+
 func TestParseServiceImportOrderConfigMapFail(t *testing.T) {
 	compressedConfigMap := coreV1.ConfigMap{
 		Data: map[string]string{"bar": "foo"},
