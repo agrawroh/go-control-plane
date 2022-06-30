@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"io"
 	"reflect"
 	"testing"
 
 	"github.com/envoyproxy/go-control-plane/rds/env"
+	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -53,6 +55,26 @@ func TestWatcherCreationFailOnInvalidDuration(t *testing.T) {
 		ConfigMapPollInterval: "foo",
 	}
 	assertPanic(t, client.setupWatcher)
+}
+
+func TestGetConfigMap(t *testing.T) {
+	client := KubernetesClient{
+		ClientSet: testClient.NewSimpleClientset(),
+	}
+	// Create a ConfigMap called `config-name` in the kubernetes namespace called `namespace` with a label `versionHash` = `1`
+	_, err := client.ClientSet.CoreV1().ConfigMaps("namespace").Create(context.TODO(), &coreV1.ConfigMap{ObjectMeta: metaV1.ObjectMeta{Name: "config-name", Labels: map[string]string{"versionHash": "1"}}}, metaV1.CreateOptions{})
+	if err != nil {
+		assert.Fail(t, "configMap creation failed with an error.")
+	}
+
+	// This should succeed as we'll be able to find this ConfigMap with version = 1
+	configMap, _ := client.getConfigMap("config-name", "namespace", "1", false)
+	assert.NotNil(t, configMap)
+	assert.Equal(t, "1", configMap.Labels["versionHash"])
+
+	// This should fail as we won't be able to find this ConfigMap with version = 2
+	configMap, _ = client.getConfigMap("config-name", "namespace", "2", false)
+	assert.Nil(t, configMap)
 }
 
 func TestParseServiceImportOrderConfigMapFail(t *testing.T) {
