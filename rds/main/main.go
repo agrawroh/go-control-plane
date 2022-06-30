@@ -493,10 +493,9 @@ func (c KubernetesClient) doUpdate(namespace string, svcImportOrderConfigMap *co
 	for index, routeTable := range routeTables {
 		routesResource[index] = routeTable
 	}
-	versionID := time.Now().Format("2006-01-02T15-04-05")
-	logger.Infof("creating new snapshot with version: %s", versionID)
+	logger.Infof("creating new snapshot with version: %s", configMapVersion)
 	newSnapshot, err := cache.NewSnapshot(
-		versionID,
+		configMapVersion,
 		map[resourcesV3.Type][]types.Resource{
 			resourcesV3.RouteType: routesResource,
 		},
@@ -506,7 +505,7 @@ func (c KubernetesClient) doUpdate(namespace string, svcImportOrderConfigMap *co
 	}
 	snapshotVal.Store(*newSnapshot)
 	lastGoodVersion = configMapVersion
-	logger.Infof("successfully updated snapshot with version: %s", versionID)
+	logger.Infof("successfully updated snapshot with version: %s", configMapVersion)
 	return nil
 }
 
