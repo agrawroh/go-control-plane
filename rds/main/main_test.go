@@ -3,10 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"github.com/envoyproxy/go-control-plane/rds/env"
 	"io"
 	"reflect"
 	"testing"
+
+	"github.com/envoyproxy/go-control-plane/rds/env"
 
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
