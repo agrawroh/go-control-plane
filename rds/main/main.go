@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -63,6 +64,13 @@ type K8s struct {
 	ClientSet kubernetes.Interface
 }
 
+// ClientMetadata is used to hold the canary metadata for a client.
+type ClientMetadata struct {
+	snapshotVersion      string
+	inCanary             bool
+	lastUpdatedTimestamp int64
+}
+
 var (
 	logger utils.Logger
 	// snapshotVal stores the latest snapshot generated from the latest version of route tables which are created by
@@ -70,13 +78,22 @@ var (
 	// service import order ConfigMap, k8s watcher triggers the update function which then reads all other ConfigMap(s)
 	// to create new route tables, generate a new snapshot, and update this value.
 	snapshotVal atomic.Value
+	// lastKnownGoodSnapshotVal stores `snapshotVal` as the LKG version of the snapshot after successfully canary-ing it
+	// to the client (APIProxy).
+	lastKnownGoodSnapshotVal atomic.Value
 	// settings contains the config flag values which are either the declared default or the values set by using the
 	// environment variables.
 	settings       env.Settings
 	configMapCache *utils.ConfigMapCache
-	// The last good version successfully pushed to all connected Envoys. It's an
-	// empty string if no config has been pushed successfully yet.
-	lastGoodVersion string
+	// lastKnownGoodVersion is the version which got successfully pushed to all the connected clients. It'll be an empty
+	// string if no config has been pushed successfully yet.
+	lastKnownGoodVersion string
+	// lastFetchedVersion is the latest version which got fetched after reading all the ConfigMap(s). This may or may
+	// not be the LKG version depending on if we are still actively canary-ing the configs or not. Upon finishing
+	// canary, LKG version would be updated to this version.
+	lastFetchedVersion string
+	// Map to store the canary status of each client connected to this RDS.
+	canaryStatusMap map[string]ClientMetadata
 )
 
 // Initialize Variables
@@ -96,8 +113,11 @@ func init() {
 
 	// Initialize Snapshot
 	snapshotVal = atomic.Value{}
+	lastKnownGoodSnapshotVal = atomic.Value{}
 	configMapCache = utils.NewConfigMapCache()
-	lastGoodVersion = ""
+	lastKnownGoodVersion = ""
+	lastFetchedVersion = ""
+	canaryStatusMap = make(map[string]ClientMetadata)
 }
 
 // ParseServiceImportOrderConfigMap parses the service import order ConfigMap and return an array of service names which
@@ -474,8 +494,8 @@ func (k K8s) doUpdate(namespace string, svcImportOrderConfigMap *coreV1.ConfigMa
 	if !versionLabelFound {
 		return errors.New("failed to get version label from the import order ConfigMap")
 	}
-	if configMapVersion == lastGoodVersion {
-		logger.Infof("Latest version is the same as last good version %s. Skipping update.", lastGoodVersion)
+	if configMapVersion == lastFetchedVersion {
+		logger.Infof("latest version is the same as last fetched version %s. skipping update.", lastFetchedVersion)
 		return nil
 	}
 	logger.Infof("Loaded new version %v", configMapVersion)
@@ -505,7 +525,7 @@ func (k K8s) doUpdate(namespace string, svcImportOrderConfigMap *coreV1.ConfigMa
 		return errors.Wrap(err, "error occurred while updating the cache snapshot")
 	}
 	snapshotVal.Store(*newSnapshot)
-	lastGoodVersion = configMapVersion
+	lastFetchedVersion = configMapVersion
 	logger.Infof("successfully updated snapshot with version: %s", configMapVersion)
 	return nil
 }
@@ -618,18 +638,113 @@ func (sc *SnapshotCache) updateSnapshotCache() {
 		}
 		latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
 		latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
-		nodesIdsSet := sc.snapshotCache.GetStatusKeys()
-		for _, nodeID := range nodesIdsSet {
-			snapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
-			if err != nil {
-				logger.Infof("unable to get the existing snapshot for nodeID: %s", nodeID, err.Error())
-				sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
-			} else if snapshot.GetVersion(resourcesV3.RouteType) != latestSnapshotVersion {
-				sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
-			}
-		}
+		// Start performing canary rollout to update the clients with the latest snapshot gradually
+		sc.doCanary(latestSnapshotVersion, &latestSnapshot)
 		time.Sleep(1 * time.Second)
 	}
+}
+
+/**
+ * doCanary kicks off the canary process by getting the IDs of the connected clients and then checking the status of all
+ * clients one-by-one.
+ */
+func (sc *SnapshotCache) doCanary(latestSnapshotVersion string, latestSnapshot *cache.Snapshot) {
+	nodeIDs := sc.snapshotCache.GetStatusKeys()
+	sort.Strings(nodeIDs)
+
+	for _, nodeID := range nodeIDs {
+		currentSnapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
+		if err != nil || currentSnapshot == nil {
+			logger.Infof("unable to get the existing snapshot for client: '%s'", nodeID)
+			updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
+			sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
+		} else {
+			if inCanary(nodeID) && !continueCanary(nodeID) {
+				logger.Infof("finished canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
+				updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
+			} else if shouldCanary(latestSnapshotVersion, nodeID, nodeIDs) {
+				logger.Infof("started canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
+				updateCanaryStatusForClient(nodeID, true, time.Now().UnixMilli(), latestSnapshotVersion)
+				sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
+			} else if latestSnapshotVersion != currentSnapshot.GetVersion(resourcesV3.RouteType) {
+				logger.Infof("enough clients are in canary. skipping updates to client: '%s' and version: '%s'", nodeID, latestSnapshotVersion)
+			}
+		}
+	}
+
+	// Check whether we are still actively canary-ing or not. Upon finishing we update the LKG version to the latest
+	// snapshot version.
+	if isCanaryFinished(nodeIDs) {
+		logger.Infof("finished canary-ing config. all clients are updated to: %s", latestSnapshotVersion)
+		lastKnownGoodSnapshotVal.Store(snapshotVal)
+		lastKnownGoodVersion = latestSnapshotVersion
+	}
+}
+
+/**
+ * shouldCanary makes a decision on whether to start canary-ing for a given client or not based on how many clients are
+ * in active canary phase.
+ */
+func shouldCanary(latestSnapshotVersion, nodeID string, nodeIDs []string) bool {
+	// If the client is already on the latest version then we don't have to canary.
+	if canaryStatusMap[nodeID].snapshotVersion == latestSnapshotVersion {
+		return false
+	}
+
+	canaryCount := 0
+	// Get the count of the clients which are currently in canary
+	for _, nodeID := range nodeIDs {
+		clientMetadata, _ := canaryStatusMap[nodeID]
+		if clientMetadata.inCanary {
+			canaryCount = canaryCount + 1
+		}
+	}
+
+	// We should canary if less than 30% of the total clients are in canary, otherwise we should not canary
+	return float32(canaryCount)/float32(len(nodeIDs)) <= settings.ConfigCanaryConcurrencyRatio
+}
+
+/**
+ * updateCanaryStatusForClient updates the map which holds the client -> canary status mapping.
+ */
+func updateCanaryStatusForClient(clientID string, inCanary bool, timestamp int64, snapshotVersion string) {
+	canaryStatusMap[clientID] = ClientMetadata{
+		lastUpdatedTimestamp: timestamp,
+		inCanary:             inCanary,
+		snapshotVersion:      snapshotVersion,
+	}
+}
+
+/**
+ * inCanary returns the current canary status for a given client.
+ */
+func inCanary(clientID string) bool {
+	clientMetadata, _ := canaryStatusMap[clientID]
+	return clientMetadata.inCanary
+}
+
+/**
+ * continueCanary checks whether to continue canary-ing for a given client based on how much time has been elapsed since
+ * we started the canary rollout.
+ */
+func continueCanary(clientID string) bool {
+	clientMetadata, _ := canaryStatusMap[clientID]
+	currentTimestamp := time.Now().UnixMilli()
+	return (currentTimestamp - clientMetadata.lastUpdatedTimestamp) < settings.ConfigCanaryTimeInMilliseconds
+}
+
+/**
+ * isCanaryFinished checks the active canary status of all the connected clients and returns true only if none of the
+ * clients are in the active canary rollout phase.
+ */
+func isCanaryFinished(nodeIDs []string) bool {
+	for _, nodeID := range nodeIDs {
+		clientMetadata, _ := canaryStatusMap[nodeID]
+		if clientMetadata.inCanary {
+			return false
+		}
+	}
+	return true
 }
 
 /**

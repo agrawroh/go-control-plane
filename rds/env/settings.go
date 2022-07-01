@@ -15,6 +15,10 @@ type Settings struct {
 	StatsDHost         string `envconfig:"STATSD_HOST" default:"localhost"`
 	DebugServerEnabled bool   `envconfig:"DEBUG_SERVER_ENABLED" default:"false"`
 
+	// Config Canary Configuration
+	ConfigCanaryTimeInMilliseconds int64   `envconfig:"CONFIG_CANARY_TIME_IN_MILLISECONDS" default:"600000"`
+	ConfigCanaryConcurrencyRatio   float32 `envconfig:"CONFIG_CANARY_CONCURRENCY_RATIO" default:"0.3"`
+
 	// Kubernetes Client Configuration
 	ClientQPS   float32 `envconfig:"K8S_CLIENT_QPS" default:"100"`
 	ClientBurst int     `envconfig:"K8S_CLIENT_BURST" default:"150"`

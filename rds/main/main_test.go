@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	resourcesV3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/server/stream/v3"
 	"io"
 	"io/ioutil"
 	"reflect"
@@ -21,17 +25,131 @@ import (
 	testClient "k8s.io/client-go/kubernetes/fake"
 )
 
+type TestSnapshotCache struct{}
+
+var (
+	snapshotsMap = make(map[string]cache.ResourceSnapshot)
+)
+
+func (c TestSnapshotCache) CreateWatch(request *cache.Request, state stream.StreamState, responses chan cache.Response) (cancel func()) {
+	logger.Infof("Request: %s | State: %s | Responses: %s", request, state, responses)
+	panic("Not Implemented!")
+}
+
+func (c TestSnapshotCache) CreateDeltaWatch(request *cache.DeltaRequest, state stream.StreamState, responses chan cache.DeltaResponse) (cancel func()) {
+	logger.Infof("Request: %s | State: %s | Responses: %s", request, state, responses)
+	panic("Not Implemented!")
+}
+
+func (c TestSnapshotCache) Fetch(ctx context.Context, request *cache.Request) (cache.Response, error) {
+	logger.Infof("Request: %s | Context: %s", request, ctx)
+	panic("Not Implemented!")
+}
+
+func (c TestSnapshotCache) SetSnapshot(_ context.Context, node string, snapshot cache.ResourceSnapshot) error {
+	snapshotsMap[node] = snapshot
+	return nil
+}
+
+func (c TestSnapshotCache) GetSnapshot(node string) (cache.ResourceSnapshot, error) {
+	return snapshotsMap[node], nil
+}
+
+func (c TestSnapshotCache) ClearSnapshot(node string) {
+	logger.Infof("Node: %s", node)
+	panic("Not Implemented!")
+}
+
+func (c TestSnapshotCache) GetStatusInfo(s string) cache.StatusInfo {
+	logger.Infof("Key: %s", s)
+	panic("Not Implemented!")
+}
+
+func (c TestSnapshotCache) GetStatusKeys() []string {
+	return []string{"1", "2", "3"}
+}
+
+func TestFirstTimeCanary(t *testing.T) {
+	sc := &SnapshotCache{
+		snapshotCache: TestSnapshotCache{},
+	}
+	latestRoutesResource := make([]types.Resource, 1)
+	version := "latest-version"
+	latestSnapshot, _ := cache.NewSnapshot(
+		version,
+		map[resourcesV3.Type][]types.Resource{
+			resourcesV3.RouteType: latestRoutesResource,
+		},
+	)
+	sc.doCanary(version, latestSnapshot)
+	assert.Equal(t, version, lastKnownGoodVersion)
+}
+
+func TestCanary(t *testing.T) {
+	sc := &SnapshotCache{
+		snapshotCache: TestSnapshotCache{},
+	}
+	latestRoutesResource := make([]types.Resource, 1)
+	version := "new-version"
+	latestSnapshot, _ := cache.NewSnapshot(
+		version,
+		map[resourcesV3.Type][]types.Resource{
+			resourcesV3.RouteType: latestRoutesResource,
+		},
+	)
+	settings = env.Settings{
+		ConfigCanaryTimeInMilliseconds: 50,
+	}
+	// This would start the canary for client '1'
+	sc.doCanary(version, latestSnapshot)
+	assert.NotEqual(t, version, lastKnownGoodVersion)
+	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
+	assert.NotEqual(t, version, canaryStatusMap["2"].snapshotVersion)
+	assert.NotEqual(t, version, canaryStatusMap["3"].snapshotVersion)
+
+	// This would mark the canary as completed for client '1'
+	time.Sleep(time.Duration(100) * time.Millisecond)
+	sc.doCanary(version, latestSnapshot)
+
+	// This would start the canary for client '2'
+	sc.doCanary(version, latestSnapshot)
+	assert.NotEqual(t, version, lastKnownGoodVersion)
+	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
+	assert.NotEqual(t, version, canaryStatusMap["3"].snapshotVersion)
+
+	// This would mark the canary as completed for client '2'
+	time.Sleep(time.Duration(100) * time.Millisecond)
+	sc.doCanary(version, latestSnapshot)
+
+	// This would start the canary for client '3'
+	sc.doCanary(version, latestSnapshot)
+	assert.NotEqual(t, version, lastKnownGoodVersion)
+	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
+
+	// This would mark the canary as completed for client '3' and would determine that canary is now finished for all
+	// three clients
+	time.Sleep(time.Duration(100) * time.Millisecond)
+	sc.doCanary(version, latestSnapshot)
+
+	// Verify that LKG version gets updated to the latest snapshot version
+	sc.doCanary(version, latestSnapshot)
+	assert.Equal(t, version, lastKnownGoodVersion)
+}
+
 func TestSkipUpdate(t *testing.T) {
-	lastGoodVersion = "abcd"
+	lastFetchedVersion = "abcd"
 	cm := &coreV1.ConfigMap{Data: map[string]string{}}
 	cm.ObjectMeta.Labels = map[string]string{}
 	// % is invalid base64 character. If update wasn't skipped, it would result in
 	// failure.
 	cm.Data["bad-data"] = "%%%"
 
-	// First test versionHash == lastGoodVersion. Update will be skipped and
+	// First test versionHash == lastFetchedVersion. Update will be skipped and
 	// invalid data won't be parsed or trigger error.
-	cm.Labels["versionHash"] = lastGoodVersion
+	cm.Labels["versionHash"] = lastFetchedVersion
 	client := K8s{
 		ClientSet: testClient.NewSimpleClientset(),
 	}
@@ -41,7 +159,7 @@ func TestSkipUpdate(t *testing.T) {
 		t.Errorf("Failed to skip update: %s", err.Error())
 	}
 
-	// Next, test versionHash != lastGoodVersion. Update will NOT be skipped and
+	// Next, test versionHash != lastFetchedVersion. Update will NOT be skipped and
 	// invalid data triggers parsing errors.
 	cm.Labels["versionHash"] = "some-other-version"
 	err = client.doUpdate("unused-namespace", cm)
@@ -67,13 +185,13 @@ func TestWatchForChanges(t *testing.T) {
 	settings.SyncDelayTimeSeconds = 1
 	settings.ConfigMapPollInterval = "1s"
 
-	cms := []coreV1.ConfigMap{}
+	var cms []coreV1.ConfigMap
 	configMapFile := "testdata/rds-config.yaml"
 
-	bytes, err := ioutil.ReadFile(configMapFile)
+	yamlBytes, err := ioutil.ReadFile(configMapFile)
 	assert.Nil(t, err, "Failed to read %s", configMapFile)
 
-	err = yaml.Unmarshal(bytes, &cms)
+	err = yaml.Unmarshal(yamlBytes, &cms)
 	assert.Nil(t, err, "Failed to unmarshal content in %s: %s", configMapFile, err)
 	assert.NotEqual(t, 0, "%s file contains 0 ConfigMaps", configMapFile)
 
