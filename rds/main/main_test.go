@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"io/ioutil"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/envoyproxy/go-control-plane/rds/env"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/yaml"
 
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -29,7 +32,7 @@ func TestSkipUpdate(t *testing.T) {
 	// First test versionHash == lastGoodVersion. Update will be skipped and
 	// invalid data won't be parsed or trigger error.
 	cm.Labels["versionHash"] = lastGoodVersion
-	client := KubernetesClient{
+	client := K8s{
 		ClientSet: testClient.NewSimpleClientset(),
 	}
 	settings = env.NewSettings()
@@ -48,7 +51,7 @@ func TestSkipUpdate(t *testing.T) {
 }
 
 func TestWatcherCreationFailOnInvalidDuration(t *testing.T) {
-	client := KubernetesClient{
+	client := K8s{
 		ClientSet: testClient.NewSimpleClientset(),
 	}
 	settings = env.Settings{
@@ -57,8 +60,48 @@ func TestWatcherCreationFailOnInvalidDuration(t *testing.T) {
 	assertPanic(t, client.setupWatcher)
 }
 
+// Tests that watchForChanges() can see pre-existing ConfigMaps and update
+// snapshotVal.
+func TestWatchForChanges(t *testing.T) {
+	settings.ConfigMapNamespace = "route-discovery-service"
+	settings.SyncDelayTimeSeconds = 1
+	settings.ConfigMapPollInterval = "1s"
+
+	cms := []coreV1.ConfigMap{}
+	configMapFile := "testdata/rds-config.yaml"
+
+	bytes, err := ioutil.ReadFile(configMapFile)
+	assert.Nil(t, err, "Failed to read %s", configMapFile)
+
+	err = yaml.Unmarshal(bytes, &cms)
+	assert.Nil(t, err, "Failed to unmarshal content in %s: %s", configMapFile, err)
+	assert.NotEqual(t, 0, "%s file contains 0 ConfigMaps", configMapFile)
+
+	k := K8s{
+		ClientSet: testClient.NewSimpleClientset(),
+	}
+	v1cms := k.ClientSet.CoreV1().ConfigMaps(settings.ConfigMapNamespace)
+	for _, cm := range cms {
+		_, err := v1cms.Create(context.TODO(), &cm, metaV1.CreateOptions{})
+		assert.Nil(t, err, "configMap creation failed with an error: %s", err)
+	}
+
+	_, err = v1cms.Get(context.TODO(), settings.EnvoyServiceImportOrderConfigName, metaV1.GetOptions{})
+	assert.Nil(t, err, "Failed to get configMap %s: %s", settings.EnvoyServiceImportOrderConfigName, err)
+
+	go k.watchForChanges(time.NewTicker(1 * time.Second))
+	for i := 0; i < 10; i++ {
+		t.Logf("Loading snapshot for the %d-th time", i)
+		s := snapshotVal.Load()
+		if s == nil {
+			time.Sleep(1 * time.Second)
+		}
+	}
+	assert.NotNil(t, snapshotVal, "Failed to update snapshotVal.")
+}
+
 func TestGetConfigMap(t *testing.T) {
-	client := KubernetesClient{
+	client := K8s{
 		ClientSet: testClient.NewSimpleClientset(),
 	}
 	// Create a ConfigMap called `config-name` in the kubernetes namespace called `namespace` with a label `versionHash` = `1`
