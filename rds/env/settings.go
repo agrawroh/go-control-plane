@@ -16,8 +16,20 @@ type Settings struct {
 	DebugServerEnabled bool   `envconfig:"DEBUG_SERVER_ENABLED" default:"false"`
 
 	// Config Canary Configuration
-	ConfigCanaryTimeInMilliseconds int64   `envconfig:"CONFIG_CANARY_TIME_IN_MILLISECONDS" default:"600000"`
-	ConfigCanaryConcurrencyRatio   float32 `envconfig:"CONFIG_CANARY_CONCURRENCY_RATIO" default:"0.3"`
+
+	/*
+	 * This is the time (in milliseconds) for which RDS would wait after canary-ing the latest config to certain
+	 * percentage of clients. This time period should be in sync with the HMR and ideally is long enough for HMR to
+	 * get some health signals from the connected clients and trigger a rollback if the health metrics aren't looking
+	 * good.
+	 */
+	ConfigCanaryTimeInMilliseconds int64 `envconfig:"CONFIG_CANARY_TIME_IN_MILLISECONDS" default:"600000"`
+
+	/*
+	 * This is the ratio of the clients to which RDS would start canary-ing the new config update after aggregating a
+	 * newly received set of ConfigMap(s).
+	 */
+	ConfigCanaryRatio float32 `envconfig:"CONFIG_CANARY_RATIO" default:"0.3"`
 
 	// Kubernetes Client Configuration
 	ClientQPS   float32 `envconfig:"K8S_CLIENT_QPS" default:"100"`

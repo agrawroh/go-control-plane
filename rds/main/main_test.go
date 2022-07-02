@@ -82,7 +82,9 @@ func TestFirstTimeCanary(t *testing.T) {
 		},
 	)
 	sc.doCanary(version, latestSnapshot)
-	assert.Equal(t, version, lastKnownGoodVersion)
+	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
 }
 
 func TestCanary(t *testing.T) {
@@ -102,41 +104,16 @@ func TestCanary(t *testing.T) {
 	}
 	// This would start the canary for client '1'
 	sc.doCanary(version, latestSnapshot)
-	assert.NotEqual(t, version, lastKnownGoodVersion)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.NotEqual(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.NotEqual(t, version, canaryStatusMap["3"].snapshotVersion)
 
-	// This would mark the canary as completed for client '1'
+	// This would mark the canary as completed for client '1' and then should update the remaining clients
 	time.Sleep(time.Duration(100) * time.Millisecond)
 	sc.doCanary(version, latestSnapshot)
-
-	// This would start the canary for client '2'
-	sc.doCanary(version, latestSnapshot)
-	assert.NotEqual(t, version, lastKnownGoodVersion)
-	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
-	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
-	assert.NotEqual(t, version, canaryStatusMap["3"].snapshotVersion)
-
-	// This would mark the canary as completed for client '2'
-	time.Sleep(time.Duration(100) * time.Millisecond)
-	sc.doCanary(version, latestSnapshot)
-
-	// This would start the canary for client '3'
-	sc.doCanary(version, latestSnapshot)
-	assert.NotEqual(t, version, lastKnownGoodVersion)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
-
-	// This would mark the canary as completed for client '3' and would determine that canary is now finished for all
-	// three clients
-	time.Sleep(time.Duration(100) * time.Millisecond)
-	sc.doCanary(version, latestSnapshot)
-
-	// Verify that LKG version gets updated to the latest snapshot version
-	sc.doCanary(version, latestSnapshot)
-	assert.Equal(t, version, lastKnownGoodVersion)
 }
 
 func TestSkipUpdate(t *testing.T) {
@@ -181,6 +158,7 @@ func TestWatcherCreationFailOnInvalidDuration(t *testing.T) {
 // Tests that watchForChanges() can see pre-existing ConfigMaps and update
 // snapshotVal.
 func TestWatchForChanges(t *testing.T) {
+	settings = env.NewSettings()
 	settings.ConfigMapNamespace = "route-discovery-service"
 	settings.SyncDelayTimeSeconds = 1
 	settings.ConfigMapPollInterval = "1s"
