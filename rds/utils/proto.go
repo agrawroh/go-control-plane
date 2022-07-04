@@ -6,6 +6,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 )
 
 /**
