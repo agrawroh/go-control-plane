@@ -43,6 +43,12 @@ type Settings struct {
 	EnvoyRouteConfigurationsConfigName string `envconfig:"ENVOY_ROUTE_CONFIGURATIONS_CONFIG_NAME" default:"envoy-route-configurations-config"`
 	EnvoyServiceImportOrderConfigName  string `envconfig:"ENVOY_SERVICE_IMPORT_ORDER_CONFIG_NAME" default:"envoy-svc-import-order-config"`
 
+	/*
+	 * This is the time (in milliseconds) for which RDS would delay the check for the connected clients and start doing
+	 * canary or reconcile the existing canary state.
+	 */
+	SnapshotCacheUpdateDelayMilliseconds int64 `envconfig:"SNAPSHOT_)CACHE_UPDATE_DELAY_MILLISECONDS" default:"1000"`
+
 	// gRPC Server Configuration
 	GrpcKeepaliveTimeSeconds    int    `envconfig:"GRPC_KEEPALIVE_TIME_SECONDS" default:"30"`
 	GrpcKeepaliveTimeoutSeconds int    `envconfig:"GRPC_KEEPALIVE_TIMEOUT_SECONDS" default:"5"`

@@ -624,6 +624,7 @@ func setupSnapshotUpdater(sc *SnapshotCache) {
  */
 func (sc *SnapshotCache) updateSnapshotCache() {
 	for {
+		time.Sleep(time.Duration(settings.SnapshotCacheUpdateDelayMilliseconds) * time.Millisecond)
 		latestSnapshotEntry := snapshotVal.Load()
 		if latestSnapshotEntry == nil {
 			continue
@@ -632,7 +633,6 @@ func (sc *SnapshotCache) updateSnapshotCache() {
 		latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
 		// Start performing canary rollout to update the clients with the latest snapshot gradually
 		sc.doCanary(latestSnapshotVersion, &latestSnapshot)
-		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -653,7 +653,7 @@ func (sc *SnapshotCache) doCanary(latestSnapshotVersion string, latestSnapshot *
 			continue
 		}
 
-		if inCanary(nodeID) && isCanaryDone(nodeID) {
+		if inCanary(nodeID) && shouldExitCanary(nodeID) {
 			logger.Infof("finished canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
 			updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
 		} else if shouldCanary(latestSnapshotVersion, nodeID, nodeIDs) {
@@ -709,14 +709,15 @@ func shouldCanary(latestSnapshotVersion, nodeID string, nodeIDs []string) bool {
 	}
 
 	// We should canary if less than 30% of the total clients are in canary, otherwise we should not canary
-	return float32(canaryCount)/float32(len(nodeIDs)) <= settings.ConfigCanaryRatio
+	totalNodes := len(nodeIDs)
+	return totalNodes > 0 && float32(canaryCount)/float32(totalNodes) <= settings.ConfigCanaryRatio
 }
 
 /**
  * updateCanaryStatusForClient updates the map which holds the client -> canary status mapping.
  */
-func updateCanaryStatusForClient(clientID string, inCanary bool, timestamp int64, snapshotVersion string) {
-	canaryStatusMap[clientID] = ClientMetadata{
+func updateCanaryStatusForClient(nodeID string, inCanary bool, timestamp int64, snapshotVersion string) {
+	canaryStatusMap[nodeID] = ClientMetadata{
 		lastUpdatedTimestamp: timestamp,
 		inCanary:             inCanary,
 		snapshotVersion:      snapshotVersion,
@@ -726,16 +727,16 @@ func updateCanaryStatusForClient(clientID string, inCanary bool, timestamp int64
 /**
  * inCanary returns the current canary status for a given client.
  */
-func inCanary(clientID string) bool {
-	return canaryStatusMap[clientID].inCanary
+func inCanary(nodeID string) bool {
+	return canaryStatusMap[nodeID].inCanary
 }
 
 /**
- * isCanaryDone checks whether to canary-ing process for a given client is finished or not based on how much time has
+ * shouldExitCanary checks whether to canary-ing process for a given client is finished or not based on how much time has
  * been elapsed since we started the canary rollout.
  */
-func isCanaryDone(clientID string) bool {
-	clientMetadata, _ := canaryStatusMap[clientID]
+func shouldExitCanary(nodeID string) bool {
+	clientMetadata, _ := canaryStatusMap[nodeID]
 	currentTimestamp := time.Now().UnixMilli()
 	return (currentTimestamp - clientMetadata.lastUpdatedTimestamp) > settings.ConfigCanaryTimeInMilliseconds
 }

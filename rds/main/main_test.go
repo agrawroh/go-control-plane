@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	resourcesV3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/server/stream/v3"
 	"io"
 	"io/ioutil"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	resourcesV3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 
 	"github.com/envoyproxy/go-control-plane/rds/env"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,53 +25,14 @@ import (
 	testClient "k8s.io/client-go/kubernetes/fake"
 )
 
-type TestSnapshotCache struct{}
-
-var (
-	snapshotsMap = make(map[string]cache.ResourceSnapshot)
-)
-
-func (c TestSnapshotCache) CreateWatch(request *cache.Request, state stream.StreamState, responses chan cache.Response) (cancel func()) {
-	logger.Infof("Request: %s | State: %s | Responses: %s", request, state, responses)
-	panic("Not Implemented!")
-}
-
-func (c TestSnapshotCache) CreateDeltaWatch(request *cache.DeltaRequest, state stream.StreamState, responses chan cache.DeltaResponse) (cancel func()) {
-	logger.Infof("Request: %s | State: %s | Responses: %s", request, state, responses)
-	panic("Not Implemented!")
-}
-
-func (c TestSnapshotCache) Fetch(ctx context.Context, request *cache.Request) (cache.Response, error) {
-	logger.Infof("Request: %s | Context: %s", request, ctx)
-	panic("Not Implemented!")
-}
-
-func (c TestSnapshotCache) SetSnapshot(_ context.Context, node string, snapshot cache.ResourceSnapshot) error {
-	snapshotsMap[node] = snapshot
-	return nil
-}
-
-func (c TestSnapshotCache) GetSnapshot(node string) (cache.ResourceSnapshot, error) {
-	return snapshotsMap[node], nil
-}
-
-func (c TestSnapshotCache) ClearSnapshot(node string) {
-	logger.Infof("Node: %s", node)
-	panic("Not Implemented!")
-}
-
-func (c TestSnapshotCache) GetStatusInfo(s string) cache.StatusInfo {
-	logger.Infof("Key: %s", s)
-	panic("Not Implemented!")
-}
-
-func (c TestSnapshotCache) GetStatusKeys() []string {
-	return []string{"1", "2", "3"}
-}
-
+// When the Route Discovery Service is starting for the first time and has only a single version, canary just returns
+// the same version to all the connected clients (Envoy Proxies). In other terms, there is no canary when RDS bootstraps
+// for the first time, and we expect all the connected clients to get the current version.
 func TestFirstTimeCanary(t *testing.T) {
 	sc := &SnapshotCache{
-		snapshotCache: TestSnapshotCache{},
+		snapshotCache: MockSnapshotCache{
+			StatusKeys: []string{"1", "2", "3"},
+		},
 	}
 	latestRoutesResource := make([]types.Resource, 1)
 	version := "latest-version"
@@ -87,9 +48,14 @@ func TestFirstTimeCanary(t *testing.T) {
 	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
 }
 
+// Verify that once the Route Discovery Service configures all the connected clients with an existing version, any
+// future versions are canary-ied first by picking the first sorted 30% clients and then gets propagated to the rest of
+// the connected clients.
 func TestCanary(t *testing.T) {
 	sc := &SnapshotCache{
-		snapshotCache: TestSnapshotCache{},
+		snapshotCache: MockSnapshotCache{
+			StatusKeys: []string{"1", "2", "3"},
+		},
 	}
 	latestRoutesResource := make([]types.Resource, 1)
 	version := "new-version"
@@ -102,13 +68,14 @@ func TestCanary(t *testing.T) {
 	settings = env.Settings{
 		ConfigCanaryTimeInMilliseconds: 50,
 	}
-	// This would start the canary for client '1'
+	// When the canary is started then, the client `1` (top 30% after sorting) in the set gets updated and remaining
+	// clients aren't affected.
 	sc.doCanary(version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.NotEqual(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.NotEqual(t, version, canaryStatusMap["3"].snapshotVersion)
 
-	// This would mark the canary as completed for client '1' and then should update the remaining clients
+	// When the canary is successfully completed then, all the remaining clients are also updated to the new version.
 	time.Sleep(time.Duration(100) * time.Millisecond)
 	sc.doCanary(version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
