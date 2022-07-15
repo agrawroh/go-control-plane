@@ -642,7 +642,8 @@ func (sc *SnapshotCache) updateSnapshotCache() {
  */
 func (sc *SnapshotCache) doCanary(latestSnapshotVersion string, latestSnapshot *cache.Snapshot) {
 	nodeIDs := sc.snapshotCache.GetStatusKeys()
-	sort.Strings(nodeIDs)
+	canarySet := getCanarySet(nodeIDs)
+	logger.Debugf("canary set: %s", canarySet)
 
 	for _, nodeID := range nodeIDs {
 		currentSnapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
@@ -656,7 +657,7 @@ func (sc *SnapshotCache) doCanary(latestSnapshotVersion string, latestSnapshot *
 		if inCanary(nodeID) && shouldExitCanary(nodeID) {
 			logger.Infof("finished canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
 			updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
-		} else if shouldCanary(latestSnapshotVersion, nodeID, nodeIDs) {
+		} else if shouldCanary(latestSnapshotVersion, nodeID, canarySet) {
 			logger.Infof("started canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
 			updateCanaryStatusForClient(nodeID, true, time.Now().UnixMilli(), latestSnapshotVersion)
 			sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
@@ -665,7 +666,7 @@ func (sc *SnapshotCache) doCanary(latestSnapshotVersion string, latestSnapshot *
 
 	// Check whether we are still actively canary-ing or not. Upon finishing we update the remaining clients to the
 	// latest snapshot version.
-	if isCanaryFinished(nodeIDs) {
+	if isCanaryFinished(canarySet) {
 		logger.Infof("finished delivery to all the clients in the canary set. updating remaining clients to version: %s", latestSnapshotVersion)
 
 		for _, nodeID := range nodeIDs {
@@ -687,30 +688,71 @@ func (sc *SnapshotCache) doCanary(latestSnapshotVersion string, latestSnapshot *
 }
 
 /**
+ * getCanarySet returns the node IDs which should be included for the canary-ing. These are the nodes to which the new
+ * config would be canary-ied to.
+ */
+func getCanarySet(nodeIDs []string) []string {
+	nodeIDMap := make(map[string]bool)
+	sort.Strings(nodeIDs)
+	for _, nodeID := range nodeIDs {
+		nodeIDMap[nodeID] = true
+	}
+
+	inCanaryNodesMap := make(map[string]bool)
+	for canaryNodeID := range canaryStatusMap {
+		if _, ok := nodeIDMap[canaryNodeID]; ok {
+			// Check whether any of the nodes are already in canary and create a separate map for the nodes which are
+			// already canary-ing.
+			if canaryStatusMap[canaryNodeID].inCanary {
+				inCanaryNodesMap[canaryNodeID] = true
+			}
+		} else {
+			// We need to delete all the nodes which are no longer connected to this RDS from the canary status map.
+			delete(canaryStatusMap, canaryNodeID)
+		}
+	}
+
+	// Create the canary set by taking the top X% of the nodes from the list (including the ones which are already
+	// in-canary).
+	requiredCanaryNodesCount := int(float32(len(nodeIDs)) * settings.ConfigCanaryRatio)
+	if requiredCanaryNodesCount == 0 {
+		requiredCanaryNodesCount = 1
+	}
+	var canaryNodeIDs []string
+	for nodeID := range inCanaryNodesMap {
+		canaryNodeIDs = append(canaryNodeIDs, nodeID)
+	}
+	for _, nodeID := range nodeIDs {
+		if len(canaryNodeIDs) >= requiredCanaryNodesCount {
+			break
+		}
+		if _, ok := inCanaryNodesMap[nodeID]; !ok {
+			canaryNodeIDs = append(canaryNodeIDs, nodeID)
+		}
+	}
+
+	return canaryNodeIDs
+}
+
+/**
  * shouldCanary makes a decision on whether to start canary-ing for a given client or not based on how many clients are
  * in active canary phase.
  */
-func shouldCanary(latestSnapshotVersion, nodeID string, nodeIDs []string) bool {
+func shouldCanary(latestSnapshotVersion, nodeID string, canarySet []string) bool {
 	// If the client is already on the latest version then we don't have to canary.
 	if canaryStatusMap[nodeID].snapshotVersion == latestSnapshotVersion {
 		return false
 	}
 
-	canaryCount := 0
-	// Get the count of the clients which are currently in canary
-	for _, node := range nodeIDs {
-		clientMetadata, _ := canaryStatusMap[node]
-		// If the client is currently canary-ing or finished canary-ing then we count it as we want the total X percent
-		// of the clients to be on the new canary version before we can send the config update to other connected
-		// clients.
-		if clientMetadata.inCanary || clientMetadata.snapshotVersion == latestSnapshotVersion {
-			canaryCount = canaryCount + 1
+	// Check whether the given node is part of the canary set and if yes then return true.
+	for _, canaryNodeID := range canarySet {
+		if canaryNodeID == nodeID {
+			return true
 		}
 	}
 
-	// We should canary if less than 30% of the total clients are in canary, otherwise we should not canary
-	totalNodes := len(nodeIDs)
-	return totalNodes > 0 && float32(canaryCount)/float32(totalNodes) <= settings.ConfigCanaryRatio
+	// We did not find the given node in the canary set and hence we should not do canary for this node.
+	return false
 }
 
 /**
