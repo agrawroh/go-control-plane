@@ -15,6 +15,22 @@ type Settings struct {
 	StatsDHost         string `envconfig:"STATSD_HOST" default:"localhost"`
 	DebugServerEnabled bool   `envconfig:"DEBUG_SERVER_ENABLED" default:"false"`
 
+	// Config Canary Configuration
+
+	/*
+	 * This is the time (in milliseconds) for which RDS would wait after canary-ing the latest config to certain
+	 * percentage of clients. This time period should be in sync with the HMR and ideally is long enough for HMR to
+	 * get some health signals from the connected clients and trigger a rollback if the health metrics aren't looking
+	 * good.
+	 */
+	ConfigCanaryTimeInMilliseconds int64 `envconfig:"CONFIG_CANARY_TIME_IN_MILLISECONDS" default:"600000"`
+
+	/*
+	 * This is the ratio of the clients to which RDS would start canary-ing the new config update after aggregating a
+	 * newly received set of ConfigMap(s).
+	 */
+	ConfigCanaryRatio float32 `envconfig:"CONFIG_CANARY_RATIO" default:"0.3"`
+
 	// Kubernetes Client Configuration
 	ClientQPS   float32 `envconfig:"K8S_CLIENT_QPS" default:"100"`
 	ClientBurst int     `envconfig:"K8S_CLIENT_BURST" default:"150"`
@@ -26,6 +42,12 @@ type Settings struct {
 	EnvoyRoutesImportOrderConfigName   string `envconfig:"ENVOY_ROUTES_IMPORT_ORDER_CONFIG_NAME" default:"envoy-routes-import-order-config"`
 	EnvoyRouteConfigurationsConfigName string `envconfig:"ENVOY_ROUTE_CONFIGURATIONS_CONFIG_NAME" default:"envoy-route-configurations-config"`
 	EnvoyServiceImportOrderConfigName  string `envconfig:"ENVOY_SERVICE_IMPORT_ORDER_CONFIG_NAME" default:"envoy-svc-import-order-config"`
+
+	/*
+	 * This is the time (in milliseconds) for which RDS would delay the check for the connected clients and start doing
+	 * canary or reconcile the existing canary state.
+	 */
+	SnapshotCacheUpdateDelayMilliseconds int64 `envconfig:"SNAPSHOT_CACHE_UPDATE_DELAY_MILLISECONDS" default:"5000"`
 
 	// gRPC Server Configuration
 	GrpcKeepaliveTimeSeconds    int    `envconfig:"GRPC_KEEPALIVE_TIME_SECONDS" default:"30"`

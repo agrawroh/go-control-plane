@@ -10,6 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	resourcesV3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+
 	"github.com/envoyproxy/go-control-plane/rds/env"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -21,17 +25,75 @@ import (
 	testClient "k8s.io/client-go/kubernetes/fake"
 )
 
+// When the Route Discovery Service is starting for the first time and has only a single version, canary just returns
+// the same version to all the connected clients (Envoy Proxies). In other terms, there is no canary when RDS bootstraps
+// for the first time, and we expect all the connected clients to get the current version.
+func TestFirstTimeCanary(t *testing.T) {
+	sc := &SnapshotCache{
+		snapshotCache: MockSnapshotCache{
+			StatusKeys: []string{"1", "2", "3"},
+		},
+	}
+	latestRoutesResource := make([]types.Resource, 1)
+	version := "latest-version"
+	latestSnapshot, _ := cache.NewSnapshot(
+		version,
+		map[resourcesV3.Type][]types.Resource{
+			resourcesV3.RouteType: latestRoutesResource,
+		},
+	)
+	sc.doCanary(version, latestSnapshot)
+	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
+}
+
+// Verify that once the Route Discovery Service configures all the connected clients with an existing version, any
+// future versions are canary-ied first by picking the first sorted 30% clients and then gets propagated to the rest of
+// the connected clients.
+func TestCanary(t *testing.T) {
+	sc := &SnapshotCache{
+		snapshotCache: MockSnapshotCache{
+			StatusKeys: []string{"1", "2", "3"},
+		},
+	}
+	latestRoutesResource := make([]types.Resource, 1)
+	version := "new-version"
+	latestSnapshot, _ := cache.NewSnapshot(
+		version,
+		map[resourcesV3.Type][]types.Resource{
+			resourcesV3.RouteType: latestRoutesResource,
+		},
+	)
+	settings = env.Settings{
+		ConfigCanaryTimeInMilliseconds: 50,
+	}
+	// When the canary is started then, the client `1` (top 30% after sorting) in the set gets updated and remaining
+	// clients aren't affected.
+	sc.doCanary(version, latestSnapshot)
+	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
+	assert.NotEqual(t, version, canaryStatusMap["2"].snapshotVersion)
+	assert.NotEqual(t, version, canaryStatusMap["3"].snapshotVersion)
+
+	// When the canary is successfully completed then, all the remaining clients are also updated to the new version.
+	time.Sleep(time.Duration(100) * time.Millisecond)
+	sc.doCanary(version, latestSnapshot)
+	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
+}
+
 func TestSkipUpdate(t *testing.T) {
-	lastGoodVersion = "abcd"
+	lastFetchedVersion = "abcd"
 	cm := &coreV1.ConfigMap{Data: map[string]string{}}
 	cm.ObjectMeta.Labels = map[string]string{}
 	// % is invalid base64 character. If update wasn't skipped, it would result in
 	// failure.
 	cm.Data["bad-data"] = "%%%"
 
-	// First test versionHash == lastGoodVersion. Update will be skipped and
+	// First test versionHash == lastFetchedVersion. Update will be skipped and
 	// invalid data won't be parsed or trigger error.
-	cm.Labels["versionHash"] = lastGoodVersion
+	cm.Labels["versionHash"] = lastFetchedVersion
 	client := K8s{
 		ClientSet: testClient.NewSimpleClientset(),
 	}
@@ -41,7 +103,7 @@ func TestSkipUpdate(t *testing.T) {
 		t.Errorf("Failed to skip update: %s", err.Error())
 	}
 
-	// Next, test versionHash != lastGoodVersion. Update will NOT be skipped and
+	// Next, test versionHash != lastFetchedVersion. Update will NOT be skipped and
 	// invalid data triggers parsing errors.
 	cm.Labels["versionHash"] = "some-other-version"
 	err = client.doUpdate("unused-namespace", cm)
@@ -63,17 +125,18 @@ func TestWatcherCreationFailOnInvalidDuration(t *testing.T) {
 // Tests that watchForChanges() can see pre-existing ConfigMaps and update
 // snapshotVal.
 func TestWatchForChanges(t *testing.T) {
+	settings = env.NewSettings()
 	settings.ConfigMapNamespace = "route-discovery-service"
 	settings.SyncDelayTimeSeconds = 1
 	settings.ConfigMapPollInterval = "1s"
 
-	cms := []coreV1.ConfigMap{}
+	var cms []coreV1.ConfigMap
 	configMapFile := "testdata/rds-config.yaml"
 
-	bytes, err := ioutil.ReadFile(configMapFile)
+	yamlBytes, err := ioutil.ReadFile(configMapFile)
 	assert.Nil(t, err, "Failed to read %s", configMapFile)
 
-	err = yaml.Unmarshal(bytes, &cms)
+	err = yaml.Unmarshal(yamlBytes, &cms)
 	assert.Nil(t, err, "Failed to unmarshal content in %s: %s", configMapFile, err)
 	assert.NotEqual(t, 0, "%s file contains 0 ConfigMaps", configMapFile)
 
