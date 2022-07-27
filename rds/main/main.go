@@ -86,9 +86,12 @@ var (
 	// not be the LKG version depending on if we are still actively canary-ing the configs or not. Upon finishing
 	// canary, LKG version would be updated to this version.
 	lastFetchedVersion string
-	// lastKnownGoodVersion is the version which got successfully pushed to all the connected clients. It'll be an empty
-	// string if no config has been pushed successfully yet.
-	lastKnownGoodVersion string
+	// lastKnownGoodSnapshotVal stores the snapshot that gets successfully pushed to all the connected clients upon
+	// canary finishes. It'll be empty
+	lastKnownGoodSnapshotVal atomic.Value
+	// lastKnownGoodSnapshotVersion is the version which got successfully pushed to all the connected clients. It'll be
+	// an empty string if no config has been pushed successfully yet.
+	lastKnownGoodSnapshotVersion string
 	// Map to store the canary status of each client connected to this RDS.
 	canaryStatusMap map[string]ClientMetadata
 )
@@ -112,7 +115,8 @@ func init() {
 	snapshotVal = atomic.Value{}
 	configMapCache = utils.NewConfigMapCache()
 	lastFetchedVersion = ""
-	lastKnownGoodVersion = ""
+	lastKnownGoodSnapshotVal = atomic.Value{}
+	lastKnownGoodSnapshotVersion = ""
 	canaryStatusMap = make(map[string]ClientMetadata)
 }
 
@@ -619,14 +623,14 @@ func (k K8s) watchForChanges(ticker *time.Ticker) {
  * the SnapshotCache.
  */
 func setupSnapshotUpdater(sc *SnapshotCache) {
-	go sc.updateSnapshotCache()
+	go sc.periodicallyUpdateSnapshotCache()
 }
 
 /**
- * updateSnapshotCache periodically updates the SnapshotCache with the latest snapshot consisting of all the Envoy
- * route tables, which the Route Discovery Service would deliver to all the connected nodes.
+ * periodicallyUpdateSnapshotCache periodically updates the SnapshotCache with the latest snapshot consisting of all the
+ * Envoy route tables, which the Route Discovery Service would deliver to all the connected nodes.
  */
-func (sc *SnapshotCache) updateSnapshotCache() {
+func (sc *SnapshotCache) periodicallyUpdateSnapshotCache() {
 	for {
 		time.Sleep(time.Duration(settings.SnapshotCacheUpdateDelayMilliseconds) * time.Millisecond)
 		latestSnapshotEntry := snapshotVal.Load()
@@ -639,28 +643,40 @@ func (sc *SnapshotCache) updateSnapshotCache() {
 		// Get the IDs of all the connected clients (nodes)
 		nodeIDs := sc.snapshotCache.GetStatusKeys()
 		if len(nodeIDs) > 0 {
-			sc.doUpdateSnapshotCache(nodeIDs, latestSnapshotVersion, &latestSnapshot)
+			sc.updateSnapshotCache(nodeIDs, latestSnapshotVersion, &latestSnapshot)
 		}
 	}
 }
 
 /**
- * doUpdateSnapshotCache updates the SnapshotCache for the connected nodes with the latest snapshot after performing the
+ * updateSnapshotCache updates the SnapshotCache for the connected nodes with the latest snapshot after performing the
  * canary.
  */
-func (sc *SnapshotCache) doUpdateSnapshotCache(nodeIDs []string, latestSnapshotVersion string, latestSnapshot *cache.Snapshot) {
-	// When the nodes/clients are connecting for the first time, we just feed the existing snapshot version.
+func (sc *SnapshotCache) updateSnapshotCache(nodeIDs []string, latestSnapshotVersion string, latestSnapshot *cache.Snapshot) {
+	// When the nodes/clients are connecting for the first time, we just feed the LKG snapshot if it's available or
+	// otherwise feed the latest snapshot (This could happen if RDS is bootstrapping for the first time and doesn't have
+	// anything marked as LKG yet).
 	for _, nodeID := range nodeIDs {
 		currentSnapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
 		if err != nil || currentSnapshot == nil {
 			logger.Infof("unable to get the existing snapshot for client: '%s'", nodeID)
+			// If we have an LKG version then we should update the node with the LKG snapshot
+			if lastKnownGoodSnapshotVersion != "" {
+				updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), lastKnownGoodSnapshotVersion)
+				lastKnownGoodSnapshotEntry := lastKnownGoodSnapshotVal.Load()
+				if lastKnownGoodSnapshotEntry != nil {
+					lastKnownGoodSnapshot := lastKnownGoodSnapshotEntry.(cache.Snapshot)
+					sc.setSnapshot(nodeID, lastKnownGoodSnapshotVersion, &lastKnownGoodSnapshot)
+					continue
+				}
+			}
 			updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
 			sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
 		}
 	}
 
 	// We only need to canary if the LKG version is not the latest snapshot version.
-	if lastKnownGoodVersion != latestSnapshotVersion {
+	if lastKnownGoodSnapshotVersion != latestSnapshotVersion {
 		// Start performing canary rollout to update the clients with the latest snapshot gradually
 		sc.doCanary(nodeIDs, latestSnapshotVersion, latestSnapshot)
 	} else {
@@ -712,7 +728,8 @@ func (sc *SnapshotCache) doCanary(nodeIDs []string, latestSnapshotVersion string
 			}
 		}
 		logger.Infof("all clients are updated to: %s", latestSnapshotVersion)
-		lastKnownGoodVersion = latestSnapshotVersion
+		lastKnownGoodSnapshotVersion = latestSnapshotVersion
+		lastKnownGoodSnapshotVal.Store(*latestSnapshot)
 	}
 }
 

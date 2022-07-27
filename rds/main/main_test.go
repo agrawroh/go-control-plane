@@ -44,7 +44,7 @@ func TestFirstTimeConfigDelivery(t *testing.T) {
 	)
 
 	nodeIDs := sc.snapshotCache.GetStatusKeys()
-	sc.doUpdateSnapshotCache(nodeIDs, version, latestSnapshot)
+	sc.updateSnapshotCache(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
@@ -74,7 +74,7 @@ func TestCanary(t *testing.T) {
 	// When the canary is started then, the client `1` (top 30% after sorting) in the set gets updated and remaining
 	// clients aren't affected.
 	nodeIDs := sc.snapshotCache.GetStatusKeys()
-	sc.doCanary(nodeIDs, version, latestSnapshot)
+	sc.updateSnapshotCache(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.NotEqual(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.NotEqual(t, version, canaryStatusMap["3"].snapshotVersion)
@@ -82,7 +82,7 @@ func TestCanary(t *testing.T) {
 	// When the canary is successfully completed then, all the remaining clients are also updated to the new version.
 	time.Sleep(time.Duration(100) * time.Millisecond)
 	nodeIDs = sc.snapshotCache.GetStatusKeys()
-	sc.doCanary(nodeIDs, version, latestSnapshot)
+	sc.updateSnapshotCache(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
@@ -94,7 +94,7 @@ func TestCanary(t *testing.T) {
 	}
 	time.Sleep(time.Duration(100) * time.Millisecond)
 	nodeIDs = sc.snapshotCache.GetStatusKeys()
-	sc.doCanary(nodeIDs, version, latestSnapshot)
+	sc.updateSnapshotCache(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["4"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["5"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["6"].snapshotVersion)
@@ -124,7 +124,7 @@ func TestCanaryReset(t *testing.T) {
 	// When the canary is started then, the client `1` (top 30% after sorting) in the set gets updated and remaining
 	// clients aren't affected.
 	nodeIDs := sc.snapshotCache.GetStatusKeys()
-	sc.doCanary(nodeIDs, version, latestSnapshot)
+	sc.updateSnapshotCache(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	newVersionLastUpdatedTimestamp := canaryStatusMap["1"].lastUpdatedTimestamp
 
@@ -133,14 +133,14 @@ func TestCanaryReset(t *testing.T) {
 	time.Sleep(time.Duration(25) * time.Millisecond)
 	secondVersion := "new-version-2"
 	nodeIDs = sc.snapshotCache.GetStatusKeys()
-	sc.doCanary(nodeIDs, secondVersion, latestSnapshot)
+	sc.updateSnapshotCache(nodeIDs, secondVersion, latestSnapshot)
 	assert.Equal(t, secondVersion, canaryStatusMap["1"].snapshotVersion)
 	assert.NotEqual(t, newVersionLastUpdatedTimestamp, canaryStatusMap["1"].lastUpdatedTimestamp)
 
 	// When the canary is successfully completed then, all the remaining clients are also updated to the new version.
 	time.Sleep(time.Duration(100) * time.Millisecond)
 	nodeIDs = sc.snapshotCache.GetStatusKeys()
-	sc.doCanary(nodeIDs, secondVersion, latestSnapshot)
+	sc.updateSnapshotCache(nodeIDs, secondVersion, latestSnapshot)
 	assert.Equal(t, secondVersion, canaryStatusMap["1"].snapshotVersion)
 	assert.Equal(t, secondVersion, canaryStatusMap["2"].snapshotVersion)
 	assert.Equal(t, secondVersion, canaryStatusMap["3"].snapshotVersion)
