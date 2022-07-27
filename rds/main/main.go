@@ -679,10 +679,6 @@ func (sc *SnapshotCache) updateSnapshotCache(nodeIDs []string, latestSnapshotVer
 	if lastKnownGoodSnapshotVersion != latestSnapshotVersion {
 		// Start performing canary rollout to update the clients with the latest snapshot gradually
 		sc.doCanary(nodeIDs, latestSnapshotVersion, latestSnapshot)
-	} else {
-		for _, nodeID := range nodeIDs {
-			sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
-		}
 	}
 }
 
