@@ -52,3 +52,21 @@ func (c MockSnapshotCache) GetStatusInfo(s string) cache.StatusInfo {
 func (c MockSnapshotCache) GetStatusKeys() []string {
 	return c.StatusKeys
 }
+
+func (c MockSnapshotCache) AddStatusKeys(keys []string) MockSnapshotCache {
+	currentKeys := c.GetStatusKeys()
+	for _, key := range keys {
+		currentKeys = append(currentKeys, key)
+	}
+	msc := MockSnapshotCache{
+		StatusKeys: currentKeys,
+	}
+	for _, key := range c.GetStatusKeys() {
+		sc, _ := c.GetSnapshot(key)
+		err := msc.SetSnapshot(nil, key, sc)
+		if err != nil {
+			return MockSnapshotCache{}
+		}
+	}
+	return msc
+}

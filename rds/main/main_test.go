@@ -52,10 +52,11 @@ func TestFirstTimeCanary(t *testing.T) {
 // future versions are canary-ied first by picking the first sorted 30% clients and then gets propagated to the rest of
 // the connected clients.
 func TestCanary(t *testing.T) {
+	msc := MockSnapshotCache{
+		StatusKeys: []string{"1", "2", "3"},
+	}
 	sc := &SnapshotCache{
-		snapshotCache: MockSnapshotCache{
-			StatusKeys: []string{"1", "2", "3"},
-		},
+		snapshotCache: msc,
 	}
 	latestRoutesResource := make([]types.Resource, 1)
 	version := "new-version"
@@ -81,6 +82,60 @@ func TestCanary(t *testing.T) {
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
+
+	// Verify that any additional nodes which gets connected to RDS after canary completes also receives the LKG version
+	// of snapshot.
+	sc = &SnapshotCache{
+		snapshotCache: msc.AddStatusKeys([]string{"4", "5", "6"}),
+	}
+	time.Sleep(time.Duration(100) * time.Millisecond)
+	sc.doCanary(version, latestSnapshot)
+	assert.Equal(t, version, canaryStatusMap["4"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["5"].snapshotVersion)
+	assert.Equal(t, version, canaryStatusMap["6"].snapshotVersion)
+}
+
+// Verify that in case when we get new Config even before Route Discovery Service finishes canary-ing an existing config
+// and marking it LKG, then we reset the canary status on the nodes canary-ing that config and restart the whole process
+// rather than continue canary-ing the old (now stale) config.
+func TestCanaryReset(t *testing.T) {
+	msc := MockSnapshotCache{
+		StatusKeys: []string{"1", "2", "3"},
+	}
+	sc := &SnapshotCache{
+		snapshotCache: msc,
+	}
+	latestRoutesResource := make([]types.Resource, 1)
+	version := "new-version-1"
+	latestSnapshot, _ := cache.NewSnapshot(
+		version,
+		map[resourcesV3.Type][]types.Resource{
+			resourcesV3.RouteType: latestRoutesResource,
+		},
+	)
+	settings = env.Settings{
+		ConfigCanaryTimeInMilliseconds: 100,
+	}
+	// When the canary is started then, the client `1` (top 30% after sorting) in the set gets updated and remaining
+	// clients aren't affected.
+	sc.doCanary(version, latestSnapshot)
+	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
+	newVersionLastUpdatedTimestamp := canaryStatusMap["1"].lastUpdatedTimestamp
+
+	// When the canary is abandoned half-way due to a new version getting pulled in then we reset the state on all the
+	// nodes currently canary-ing the old config.
+	time.Sleep(time.Duration(25) * time.Millisecond)
+	secondVersion := "new-version-2"
+	sc.doCanary(secondVersion, latestSnapshot)
+	assert.Equal(t, secondVersion, canaryStatusMap["1"].snapshotVersion)
+	assert.NotEqual(t, newVersionLastUpdatedTimestamp, canaryStatusMap["1"].lastUpdatedTimestamp)
+
+	// When the canary is successfully completed then, all the remaining clients are also updated to the new version.
+	time.Sleep(time.Duration(100) * time.Millisecond)
+	sc.doCanary(secondVersion, latestSnapshot)
+	assert.Equal(t, secondVersion, canaryStatusMap["1"].snapshotVersion)
+	assert.Equal(t, secondVersion, canaryStatusMap["2"].snapshotVersion)
+	assert.Equal(t, secondVersion, canaryStatusMap["3"].snapshotVersion)
 }
 
 func TestSkipUpdate(t *testing.T) {
