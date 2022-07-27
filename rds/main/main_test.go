@@ -25,10 +25,10 @@ import (
 	testClient "k8s.io/client-go/kubernetes/fake"
 )
 
-// When the Route Discovery Service is starting for the first time and has only a single version, canary just returns
-// the same version to all the connected clients (Envoy Proxies). In other terms, there is no canary when RDS bootstraps
-// for the first time, and we expect all the connected clients to get the current version.
-func TestFirstTimeCanary(t *testing.T) {
+// When the Route Discovery Service is starting for the first time and has only a single version, updating the snapshot
+// sets the same version to all the connected clients (Envoy Proxies). In other terms, there is no canary when RDS
+// bootstraps for the first time, and we expect all the connected clients to get the current version.
+func TestFirstTimeConfigDelivery(t *testing.T) {
 	sc := &SnapshotCache{
 		snapshotCache: MockSnapshotCache{
 			StatusKeys: []string{"1", "2", "3"},
@@ -42,7 +42,9 @@ func TestFirstTimeCanary(t *testing.T) {
 			resourcesV3.RouteType: latestRoutesResource,
 		},
 	)
-	sc.doCanary(version, latestSnapshot)
+
+	nodeIDs := sc.snapshotCache.GetStatusKeys()
+	sc.doUpdateSnapshotCache(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
@@ -71,25 +73,28 @@ func TestCanary(t *testing.T) {
 	}
 	// When the canary is started then, the client `1` (top 30% after sorting) in the set gets updated and remaining
 	// clients aren't affected.
-	sc.doCanary(version, latestSnapshot)
+	nodeIDs := sc.snapshotCache.GetStatusKeys()
+	sc.doCanary(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.NotEqual(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.NotEqual(t, version, canaryStatusMap["3"].snapshotVersion)
 
 	// When the canary is successfully completed then, all the remaining clients are also updated to the new version.
 	time.Sleep(time.Duration(100) * time.Millisecond)
-	sc.doCanary(version, latestSnapshot)
+	nodeIDs = sc.snapshotCache.GetStatusKeys()
+	sc.doCanary(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["2"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["3"].snapshotVersion)
 
-	// Verify that any additional nodes which gets connected to RDS after canary completes also receives the LKG version
-	// of snapshot.
+	// Verify that any additional nodes which gets connected to the Route Discovery Service after the canary process
+	// completes also receives the LKG version of the snapshot.
 	sc = &SnapshotCache{
 		snapshotCache: msc.AddStatusKeys([]string{"4", "5", "6"}),
 	}
 	time.Sleep(time.Duration(100) * time.Millisecond)
-	sc.doCanary(version, latestSnapshot)
+	nodeIDs = sc.snapshotCache.GetStatusKeys()
+	sc.doCanary(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["4"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["5"].snapshotVersion)
 	assert.Equal(t, version, canaryStatusMap["6"].snapshotVersion)
@@ -118,7 +123,8 @@ func TestCanaryReset(t *testing.T) {
 	}
 	// When the canary is started then, the client `1` (top 30% after sorting) in the set gets updated and remaining
 	// clients aren't affected.
-	sc.doCanary(version, latestSnapshot)
+	nodeIDs := sc.snapshotCache.GetStatusKeys()
+	sc.doCanary(nodeIDs, version, latestSnapshot)
 	assert.Equal(t, version, canaryStatusMap["1"].snapshotVersion)
 	newVersionLastUpdatedTimestamp := canaryStatusMap["1"].lastUpdatedTimestamp
 
@@ -126,13 +132,15 @@ func TestCanaryReset(t *testing.T) {
 	// nodes currently canary-ing the old config.
 	time.Sleep(time.Duration(25) * time.Millisecond)
 	secondVersion := "new-version-2"
-	sc.doCanary(secondVersion, latestSnapshot)
+	nodeIDs = sc.snapshotCache.GetStatusKeys()
+	sc.doCanary(nodeIDs, secondVersion, latestSnapshot)
 	assert.Equal(t, secondVersion, canaryStatusMap["1"].snapshotVersion)
 	assert.NotEqual(t, newVersionLastUpdatedTimestamp, canaryStatusMap["1"].lastUpdatedTimestamp)
 
 	// When the canary is successfully completed then, all the remaining clients are also updated to the new version.
 	time.Sleep(time.Duration(100) * time.Millisecond)
-	sc.doCanary(secondVersion, latestSnapshot)
+	nodeIDs = sc.snapshotCache.GetStatusKeys()
+	sc.doCanary(nodeIDs, secondVersion, latestSnapshot)
 	assert.Equal(t, secondVersion, canaryStatusMap["1"].snapshotVersion)
 	assert.Equal(t, secondVersion, canaryStatusMap["2"].snapshotVersion)
 	assert.Equal(t, secondVersion, canaryStatusMap["3"].snapshotVersion)

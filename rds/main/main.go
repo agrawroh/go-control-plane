@@ -623,8 +623,8 @@ func setupSnapshotUpdater(sc *SnapshotCache) {
 }
 
 /**
- * updateSnapshotCache periodically updates the SnapshotCache, which the go-control-plane would deliver to the
- * connected watchers.
+ * updateSnapshotCache periodically updates the SnapshotCache with the latest snapshot consisting of all the Envoy
+ * route tables, which the Route Discovery Service would deliver to all the connected nodes.
  */
 func (sc *SnapshotCache) updateSnapshotCache() {
 	for {
@@ -635,73 +635,84 @@ func (sc *SnapshotCache) updateSnapshotCache() {
 		}
 		latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
 		latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
-		// Start performing canary rollout to update the clients with the latest snapshot gradually
-		sc.doCanary(latestSnapshotVersion, &latestSnapshot)
+
+		// Get the IDs of all the connected clients (nodes)
+		nodeIDs := sc.snapshotCache.GetStatusKeys()
+		if len(nodeIDs) > 0 {
+			sc.doUpdateSnapshotCache(nodeIDs, latestSnapshotVersion, &latestSnapshot)
+		}
 	}
 }
 
 /**
- * doCanary kicks off the canary process by getting the IDs of the connected clients and then checking the status of all
- * clients one-by-one.
+ * doUpdateSnapshotCache updates the SnapshotCache for the connected nodes with the latest snapshot after performing the
+ * canary.
  */
-func (sc *SnapshotCache) doCanary(latestSnapshotVersion string, latestSnapshot *cache.Snapshot) {
-	nodeIDs := sc.snapshotCache.GetStatusKeys()
-	if len(nodeIDs) > 0 {
-		// When the nodes/clients are connecting for the first time, we just return the existing snapshot version.
+func (sc *SnapshotCache) doUpdateSnapshotCache(nodeIDs []string, latestSnapshotVersion string, latestSnapshot *cache.Snapshot) {
+	// When the nodes/clients are connecting for the first time, we just feed the existing snapshot version.
+	for _, nodeID := range nodeIDs {
+		currentSnapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
+		if err != nil || currentSnapshot == nil {
+			logger.Infof("unable to get the existing snapshot for client: '%s'", nodeID)
+			updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
+			sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
+		}
+	}
+
+	// We only need to canary if the LKG version is not the latest snapshot version.
+	if lastKnownGoodVersion != latestSnapshotVersion {
+		// Start performing canary rollout to update the clients with the latest snapshot gradually
+		sc.doCanary(nodeIDs, latestSnapshotVersion, latestSnapshot)
+	} else {
+		for _, nodeID := range nodeIDs {
+			sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
+		}
+	}
+}
+
+/**
+ * doCanary kicks off the canary process by creating a canary set, feeding the latest snapshot to the canary set and
+ * checking the status of all clients one-by-one. Upon completing the canary, it updates the remaining clients/nodes
+ * with the latest version of thr snapshot and marking it as LKG.
+ */
+func (sc *SnapshotCache) doCanary(nodeIDs []string, latestSnapshotVersion string, latestSnapshot *cache.Snapshot) {
+	// Start the canary process for the new snapshot version.
+	canarySet := getCanarySet(nodeIDs, latestSnapshotVersion)
+	logger.Debugf("canary set: %s", canarySet)
+	for _, nodeID := range nodeIDs {
+		if inCanary(nodeID) {
+			if shouldExitCanary(nodeID) {
+				logger.Infof("finished canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
+				updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
+				continue
+			}
+			logger.Debugf("client: '%s' is still canary-ing snapshot version: '%s'", nodeID, latestSnapshotVersion)
+		} else if shouldCanary(latestSnapshotVersion, nodeID, canarySet) {
+			logger.Infof("started canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
+			updateCanaryStatusForClient(nodeID, true, time.Now().UnixMilli(), latestSnapshotVersion)
+			sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
+		}
+	}
+
+	// Check whether we are still actively canary-ing or not. Upon finishing we update the remaining clients to the
+	// latest snapshot version.
+	if isCanaryFinished(canarySet) {
 		for _, nodeID := range nodeIDs {
 			currentSnapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
 			if err != nil || currentSnapshot == nil {
 				logger.Infof("unable to get the existing snapshot for client: '%s'", nodeID)
 				updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
 				sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
-			}
-		}
-
-		// We only need to canary if the LKG version is not the latest snapshot version.
-		if lastKnownGoodVersion != latestSnapshotVersion {
-			// Start the canary process for the new snapshot version.
-			canarySet := getCanarySet(nodeIDs, latestSnapshotVersion)
-			logger.Debugf("canary set: %s", canarySet)
-			for _, nodeID := range nodeIDs {
-				if inCanary(nodeID) {
-					if shouldExitCanary(nodeID) {
-						logger.Infof("finished canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
-						updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
-						continue
-					}
-					logger.Debugf("client: '%s' is still canary-ing snapshot version: '%s'", nodeID, latestSnapshotVersion)
-				} else if shouldCanary(latestSnapshotVersion, nodeID, canarySet) {
-					logger.Infof("started canary rollout to client: '%s' with version: '%s'", nodeID, latestSnapshotVersion)
-					updateCanaryStatusForClient(nodeID, true, time.Now().UnixMilli(), latestSnapshotVersion)
-					sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
-				}
+				continue
 			}
 
-			// Check whether we are still actively canary-ing or not. Upon finishing we update the remaining clients to the
-			// latest snapshot version.
-			if isCanaryFinished(canarySet) {
-				for _, nodeID := range nodeIDs {
-					currentSnapshot, err := sc.snapshotCache.GetSnapshot(nodeID)
-					if err != nil || currentSnapshot == nil {
-						logger.Infof("unable to get the existing snapshot for client: '%s'", nodeID)
-						updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
-						sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
-						continue
-					}
-
-					if latestSnapshotVersion != currentSnapshot.GetVersion(resourcesV3.RouteType) {
-						updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
-						sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
-					}
-				}
-				logger.Infof("all clients are updated to: %s", latestSnapshotVersion)
-				lastKnownGoodVersion = latestSnapshotVersion
-			}
-		} else {
-			for _, nodeID := range nodeIDs {
+			if latestSnapshotVersion != currentSnapshot.GetVersion(resourcesV3.RouteType) {
+				updateCanaryStatusForClient(nodeID, false, time.Now().UnixMilli(), latestSnapshotVersion)
 				sc.setSnapshot(nodeID, latestSnapshotVersion, latestSnapshot)
 			}
 		}
+		logger.Infof("all clients are updated to: %s", latestSnapshotVersion)
+		lastKnownGoodVersion = latestSnapshotVersion
 	}
 }
 
