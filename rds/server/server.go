@@ -24,7 +24,7 @@ import (
 	"github.com/gorilla/mux"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 
-	routeService "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
+	endpointService "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
 )
 
@@ -193,7 +193,7 @@ func RunServer(settings *env.Settings, server server.Server, logger utils.Logger
 	}
 
 	// Register RDS service
-	routeService.RegisterRouteDiscoveryServiceServer(grpcServer, server)
+	endpointService.RegisterEndpointDiscoveryServiceServer(grpcServer, server)
 	logger.Infof("RDS Management Server Started. Port: %d\n", port)
 	if err = grpcServer.Serve(listener); err != nil {
 		panic(err)

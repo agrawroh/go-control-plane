@@ -38,7 +38,7 @@ type Settings struct {
 	// ConfigMap(s)
 	ConfigMapNamespace                 string `envconfig:"CONFIG_MAP_NAMESPACE" default:"default"`
 	SyncDelayTimeSeconds               int    `envconfig:"CONFIG_MAP_SYNC_DELAY_TIME_SECONDS" default:"60"`
-	ConfigMapPollInterval              string `envconfig:"CONFIG_MAP_POLL_INTERVAL" default:"10s"`
+	ConfigMapPollInterval              string `envconfig:"CONFIG_MAP_POLL_INTERVAL" default:"1s"`
 	EnvoyRoutesImportOrderConfigName   string `envconfig:"ENVOY_ROUTES_IMPORT_ORDER_CONFIG_NAME" default:"envoy-routes-import-order-config"`
 	EnvoyRouteConfigurationsConfigName string `envconfig:"ENVOY_ROUTE_CONFIGURATIONS_CONFIG_NAME" default:"envoy-route-configurations-config"`
 	EnvoyServiceImportOrderConfigName  string `envconfig:"ENVOY_SERVICE_IMPORT_ORDER_CONFIG_NAME" default:"envoy-svc-import-order-config"`
@@ -47,7 +47,7 @@ type Settings struct {
 	 * This is the time (in milliseconds) for which RDS would delay the check for the connected clients and start doing
 	 * canary or reconcile the existing canary state.
 	 */
-	SnapshotCacheUpdateDelayMilliseconds int64 `envconfig:"SNAPSHOT_CACHE_UPDATE_DELAY_MILLISECONDS" default:"5000"`
+	SnapshotCacheUpdateDelayMilliseconds int64 `envconfig:"SNAPSHOT_CACHE_UPDATE_DELAY_MILLISECONDS" default:"1000"`
 
 	// gRPC Server Configuration
 	GrpcKeepaliveTimeSeconds    int    `envconfig:"GRPC_KEEPALIVE_TIME_SECONDS" default:"30"`

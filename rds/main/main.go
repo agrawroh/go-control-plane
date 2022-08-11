@@ -1,11 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	endpointV3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+	"io/ioutil"
+	"log"
+	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -16,6 +24,7 @@ import (
 
 	"github.com/envoyproxy/go-control-plane/rds/env"
 
+	coreV3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	resourcesV3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	rdsServer "github.com/envoyproxy/go-control-plane/rds/server"
@@ -598,20 +607,142 @@ func (k K8s) setupWatcher() {
 func (k K8s) watchForChanges(ticker *time.Ticker) {
 	defer ticker.Stop()
 	namespace := settings.ConfigMapNamespace
-	v1ConfigMap := k.ClientSet.CoreV1().ConfigMaps(namespace)
+	endpoints := k.ClientSet.CoreV1().Endpoints(namespace)
 	for {
 		select {
 		case <-ticker.C:
-			cm, err := v1ConfigMap.Get(context.TODO(), settings.EnvoyServiceImportOrderConfigName, metaV1.GetOptions{})
+			endpoint, err := endpoints.Get(context.TODO(), "dummyservice", metaV1.GetOptions{})
 			if err != nil {
 				logger.Errorf("error occurred while creating the watcher", err.Error())
 				panic(err.Error())
 			}
-			if err = k.doUpdate(namespace, cm); err != nil {
+			if err = k.doEndpointUpdate(namespace, endpoint); err != nil {
 				logger.Errorf("error occurred while processing update", err.Error())
 			}
 		}
 	}
+}
+
+func (k K8s) doEndpointUpdate(namespace string, endpoint *coreV1.Endpoints) error {
+	var endpoints []*endpointV3.LocalityLbEndpoints
+	for _, sub := range endpoint.Subsets {
+		addressMap := make(map[string]float64)
+		scoresMap := make(map[string]uint32)
+		for _, addr := range sub.Addresses {
+			// Make API Call
+			httpClient := &http.Client{
+				Transport: &http.Transport{DisableCompression: true},
+			}
+			logger.Infof("address = %s", addr.IP)
+			resp, err := httpClient.Get("http://" + addr.IP + ":7777/metrics")
+			if err != nil {
+				log.Fatalln(err)
+			}
+			body, err := ioutil.ReadAll(resp.Body)
+			err = resp.Body.Close()
+			if err != nil {
+				return err
+			}
+			r, err := gzip.NewReader(bytes.NewBuffer(body))
+			result, _ := ioutil.ReadAll(r)
+
+			// CPU Metrics
+			metrics := strings.Split(string(result), "\n")
+			var cpuLoad = float64(0)
+			var nrCpus = float64(0)
+			for _, metric := range metrics {
+				if cpuLoad > 0 && nrCpus > 0 {
+					break
+				}
+				if strings.Contains(metric, "system_cpu") {
+					if strings.Contains(metric, "load_1m") {
+						if s, err := strconv.ParseFloat(strings.Split(metric, " ")[1], 32); err == nil {
+							logger.Infof("cpuLoad = %f", s)
+							cpuLoad = s
+						}
+					} else if strings.Contains(metric, "nr_cpus") {
+						if s, err := strconv.ParseFloat(strings.Split(metric, " ")[1], 32); err == nil {
+							logger.Infof("nr_cpus = %f", s)
+							nrCpus = s
+						}
+					}
+				}
+			}
+			avgLoad := 100 - (cpuLoad/nrCpus)*100
+			logger.Infof("avg_cpu_load = %f", avgLoad)
+			addressMap[addr.IP] = avgLoad
+		}
+
+		// Calculate Scores
+		var allLoad = float64(0)
+		for _, avgCpuLoad := range addressMap {
+			allLoad = allLoad + avgCpuLoad
+		}
+		logger.Infof("all_load = %f", allLoad)
+		total := uint32(0)
+		for addr, avgCpuLoad := range addressMap {
+			score := 100 * avgCpuLoad / allLoad
+			scoresMap[addr] = uint32(score + 0.5)
+			total += scoresMap[addr]
+			if total > 100 {
+				scoresMap[addr] = scoresMap[addr] - (total - 100)
+			}
+			logger.Infof("ip = %s, score = %d", addr, scoresMap[addr])
+			for _, port := range sub.Ports {
+				ep := endpointV3.LocalityLbEndpoints{
+					// Individual Pod IP Addresses
+					Priority: 0,
+					LoadBalancingWeight: &wrapperspb.UInt32Value{
+						Value: scoresMap[addr],
+					},
+					LbEndpoints: []*endpointV3.LbEndpoint{
+						{
+							HostIdentifier: &endpointV3.LbEndpoint_Endpoint{
+								Endpoint: &endpointV3.Endpoint{
+									Hostname: "dummy-service.databricks.com",
+									Address: &coreV3.Address{
+										Address: &coreV3.Address_SocketAddress{
+											SocketAddress: &coreV3.SocketAddress{
+												Address: addr,
+												PortSpecifier: &coreV3.SocketAddress_PortValue{
+													PortValue: uint32(port.Port),
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				}
+				endpoints = append(endpoints, &ep)
+			}
+		}
+	}
+	// logger.Infof("endpoints = %s", endpoints)
+	clusterLoadAssignments := []*endpointV3.ClusterLoadAssignment{
+		{
+			ClusterName: "dummyService",
+			Endpoints:   endpoints,
+		},
+	}
+	endpointResources := make([]types.Resource, 1)
+	endpointResources[0] = clusterLoadAssignments[0]
+	version := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	logger.Infof("creating new snapshot with version: %s", version)
+	newSnapshot, err := cache.NewSnapshot(
+		version,
+		map[resourcesV3.Type][]types.Resource{
+			resourcesV3.EndpointType: endpointResources,
+		},
+	)
+	if err != nil {
+		return errors.Wrap(err, "error occurred while updating the cache snapshot")
+	}
+	snapshotVal.Store(*newSnapshot)
+	lastFetchedVersion = version
+	logger.Infof("successfully updated snapshot with version: %s", version)
+	return nil
 }
 
 /**
@@ -634,9 +765,11 @@ func (sc *SnapshotCache) updateSnapshotCache() {
 			continue
 		}
 		latestSnapshot := latestSnapshotEntry.(cache.Snapshot)
-		latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.RouteType)
-		// Start performing canary rollout to update the clients with the latest snapshot gradually
-		sc.doCanary(latestSnapshotVersion, &latestSnapshot)
+		latestSnapshotVersion := latestSnapshot.GetVersion(resourcesV3.EndpointType)
+		nodeIDs := sc.snapshotCache.GetStatusKeys()
+		for _, nodeID := range nodeIDs {
+			sc.setSnapshot(nodeID, latestSnapshotVersion, &latestSnapshot)
+		}
 	}
 }
 
