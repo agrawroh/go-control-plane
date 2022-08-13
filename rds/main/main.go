@@ -629,6 +629,17 @@ func setupSnapshotUpdater(sc *SnapshotCache) {
 func (sc *SnapshotCache) updateSnapshotCache() {
 	for {
 		time.Sleep(time.Duration(settings.SnapshotCacheUpdateDelayMilliseconds) * time.Millisecond)
+		nodeIDs := sc.snapshotCache.GetStatusKeys()
+		var nodes []string
+		for _, nodeId := range nodeIDs {
+			numWatches := sc.snapshotCache.GetStatusInfo(nodeId).GetNumDeltaWatches()
+			if numWatches == 0 {
+				sc.snapshotCache.ClearSnapshot(nodeId)
+			} else {
+				nodes = append(nodes, nodeId)
+			}
+		}
+		logger.Infof("[RDS] I have '%d' connected clients : %s", len(nodes), nodes)
 		latestSnapshotEntry := snapshotVal.Load()
 		if latestSnapshotEntry == nil {
 			continue

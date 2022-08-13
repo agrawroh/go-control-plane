@@ -47,7 +47,7 @@ type Settings struct {
 	 * This is the time (in milliseconds) for which RDS would delay the check for the connected clients and start doing
 	 * canary or reconcile the existing canary state.
 	 */
-	SnapshotCacheUpdateDelayMilliseconds int64 `envconfig:"SNAPSHOT_CACHE_UPDATE_DELAY_MILLISECONDS" default:"5000"`
+	SnapshotCacheUpdateDelayMilliseconds int64 `envconfig:"SNAPSHOT_CACHE_UPDATE_DELAY_MILLISECONDS" default:"1000"`
 
 	// gRPC Server Configuration
 	GrpcKeepaliveTimeSeconds    int    `envconfig:"GRPC_KEEPALIVE_TIME_SECONDS" default:"30"`
